@@ -20,3 +20,7 @@ Thumbs.db
 *.dylib
 *.dll
 *.exe
+*.mir
+*.hir
+*.ll
+*.s
