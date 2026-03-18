@@ -170,4 +170,65 @@ impl BuildPipeline {
             Ok(())
         }
     }
+
+    /// Run a Ruby source file through the interpreter (JIT Tier 0).
+    pub fn run(&self) -> Result<(), JDRubyError> {
+        let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
+
+        for input in &self.config.input_files {
+            if self.config.verbose {
+                eprintln!("\x1b[1;36mRunning\x1b[0m {}", input.display());
+            }
+
+            // 1. Read source
+            let source = std::fs::read_to_string(input).map_err(|e| {
+                JDRubyError::Io(std::io::Error::new(e.kind(), format!("{}: {}", input.display(), e)))
+            })?;
+
+            // 2. Lex
+            let mut lexer = jdruby_lexer::Lexer::new(&source);
+            let (tokens, lex_diags) = lexer.tokenize();
+            all_diagnostics.extend(lex_diags.iter().cloned());
+            if lex_diags.iter().any(|d| d.is_error()) { continue; }
+
+            // 3. Parse
+            let (program, parse_diags) = jdruby_parser::parse(tokens);
+            all_diagnostics.extend(parse_diags.iter().cloned());
+            if parse_diags.iter().any(|d| d.is_error()) { continue; }
+
+            // 4. Semantic Analysis
+            let mut analyzer = jdruby_semantic::SemanticAnalyzer::new();
+            let _sem_diags = analyzer.analyze(&program);
+
+            // 5. AST → HIR
+            let mut hir_module = jdruby_hir::AstLowering::lower(&program);
+            jdruby_hir::HirOptimizer::optimize(&mut hir_module);
+
+            // 6. HIR → MIR
+            let mut mir_module = jdruby_mir::HirLowering::lower(&hir_module);
+            jdruby_mir::MirOptimizer::optimize(&mut mir_module);
+
+            // 7. Execute via JIT interpreter
+            let mut interpreter = jdruby_jit::interpreter::MirInterpreter::new();
+            interpreter.load_module(&mir_module);
+            let _result = interpreter.run();
+        }
+
+        if !all_diagnostics.is_empty() {
+            for d in &all_diagnostics {
+                let prefix = if d.is_error() { "\x1b[1;31merror" }
+                             else { "\x1b[1;33mwarning" };
+                eprintln!("{}\x1b[0m: {}", prefix, d.message);
+            }
+        }
+
+        let error_count = all_diagnostics.iter().filter(|d| d.is_error()).count();
+        if error_count > 0 {
+            Err(JDRubyError::Build { message: format!(
+                "execution failed with {} error(s)", error_count
+            ) })
+        } else {
+            Ok(())
+        }
+    }
 }

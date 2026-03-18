@@ -174,12 +174,16 @@ fn cmd_build(
     pipeline.build().map_err(|e| e.into())
 }
 
-/// Compile and run a Ruby file.
+/// Compile and run a Ruby file via JIT interpreter.
 fn cmd_run(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "\x1b[1;33mwarning\x1b[0m: `run` command not yet implemented — showing tokens instead"
-    );
-    cmd_lex(file)
+    let config = jdruby_builder::BuildConfig {
+        input_files: vec![file.clone()],
+        output_path: std::path::PathBuf::from("a.out"),
+        verbose: false,
+        ..Default::default()
+    };
+    let pipeline = jdruby_builder::BuildPipeline::new(config);
+    pipeline.run().map_err(|e| e.into())
 }
 
 /// Show version and environment info.

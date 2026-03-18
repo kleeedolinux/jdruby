@@ -13,3 +13,4 @@ jdruby-hir.workspace = true
 jdruby-mir.workspace = true
 jdruby-codegen.workspace = true
 jdruby-runtime.workspace = true
+jdruby-jit.workspace = true

@@ -153,6 +153,7 @@ dependencies = [
  "jdruby-codegen",
  "jdruby-common",
  "jdruby-hir",
+ "jdruby-jit",
  "jdruby-lexer",
  "jdruby-mir",
  "jdruby-parser",
@@ -182,6 +183,15 @@ version = "0.1.0"
 dependencies = [
  "jdruby-ast",
  "jdruby-common",
+]
+
+[[package]]
+name = "jdruby-jit"
+version = "0.1.0"
+dependencies = [
+ "jdruby-codegen",
+ "jdruby-common",
+ "jdruby-mir",
 ]
 
 [[package]]

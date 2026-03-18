@@ -11,6 +11,7 @@ members = [
     "crates/jdruby-mir",
     "crates/jdruby-codegen",
     "crates/jdruby-runtime",
+    "crates/jdruby-jit",
     "crates/jdruby-builder",
 ]
 
@@ -33,6 +34,7 @@ jdruby-hir = { path = "crates/jdruby-hir" }
 jdruby-mir = { path = "crates/jdruby-mir" }
 jdruby-codegen = { path = "crates/jdruby-codegen" }
 jdruby-runtime = { path = "crates/jdruby-runtime" }
+jdruby-jit = { path = "crates/jdruby-jit" }
 jdruby-builder = { path = "crates/jdruby-builder" }
 
 # External dependencies

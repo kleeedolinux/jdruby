@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 *.pdb
-
+ruby/
 # IDE
 .idea/
 .vscode/

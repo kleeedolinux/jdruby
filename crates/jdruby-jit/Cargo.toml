@@ -1,0 +1,10 @@
+[package]
+name = "jdruby-jit"
+version.workspace = true
+edition.workspace = true
+description = "JIT compiler for JDRuby — compiles MIR to native code at runtime"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-mir.workspace = true
+jdruby-codegen.workspace = true
