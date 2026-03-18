@@ -45,12 +45,36 @@ enum Commands {
         /// Emit debug information
         #[arg(short, long)]
         debug: bool,
+
+        /// Emit LLVM IR (.ll file)
+        #[arg(long = "emit-ll")]
+        emit_ll: bool,
+
+        /// Emit HIR (.hir file)
+        #[arg(long = "emit-hir")]
+        emit_hir: bool,
+
+        /// Emit MIR (.mir file)
+        #[arg(long = "emit-mir")]
+        emit_mir: bool,
+
+        /// Emit assembly (.s file)
+        #[arg(long = "emit-asm", short = 'S')]
+        emit_asm: bool,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Compile and run a Ruby source file
     Run {
         /// Path to the Ruby source file
         file: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Show version and environment info
@@ -63,10 +87,10 @@ fn main() {
     let result = match cli.command {
         Commands::Lex { file } => cmd_lex(&file),
         Commands::Parse { file } => cmd_parse(&file),
-        Commands::Build { file, output, opt_level, debug } => {
-            cmd_build(&file, &output, opt_level, debug)
+        Commands::Build { file, output, opt_level, debug, emit_ll, emit_hir, emit_mir, emit_asm, verbose } => {
+            cmd_build(&file, &output, opt_level, debug, emit_ll, emit_hir, emit_mir, emit_asm, verbose)
         }
-        Commands::Run { file } => cmd_run(&file),
+        Commands::Run { file, verbose } => cmd_run(&file, verbose),
         Commands::Info => cmd_info(),
     };
 
@@ -82,24 +106,17 @@ fn cmd_lex(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut lexer = jdruby_lexer::Lexer::new(&source);
     let (tokens, diagnostics) = lexer.tokenize();
 
-    // Print diagnostics
     for diag in &diagnostics {
         let (line, col) = line_col_from_offset(&source, diag.span.start);
         eprintln!(
             "\x1b[1;33m{}\x1b[0m: {} ({}:{}:{})",
-            diag.severity,
-            diag.message,
-            file.display(),
-            line,
-            col
+            diag.severity, diag.message, file.display(), line, col
         );
     }
 
-    // Print tokens
     println!(
         "\x1b[1;36m── Tokens for {} ──\x1b[0m ({} tokens)",
-        file.display(),
-        tokens.len()
+        file.display(), tokens.len()
     );
     println!();
 
@@ -107,8 +124,7 @@ fn cmd_lex(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let (line, col) = line_col_from_offset(&source, token.span.start);
         println!(
             "  \x1b[90m{:>4}:{:<3}\x1b[0m  \x1b[1;32m{:<25}\x1b[0m  \x1b[33m{:?}\x1b[0m",
-            line,
-            col,
+            line, col,
             format!("{:?}", token.kind),
             token.lexeme.escape_default().to_string()
         );
@@ -118,10 +134,7 @@ fn cmd_lex(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     if diagnostics.is_empty() {
         println!("\x1b[1;32m✓\x1b[0m No lexer errors");
     } else {
-        println!(
-            "\x1b[1;31m✗\x1b[0m {} diagnostic(s)",
-            diagnostics.len()
-        );
+        println!("\x1b[1;31m✗\x1b[0m {} diagnostic(s)", diagnostics.len());
     }
 
     Ok(())
@@ -161,25 +174,69 @@ fn cmd_build(
     output: &PathBuf,
     opt_level: u8,
     debug: bool,
+    emit_ll: bool,
+    emit_hir: bool,
+    emit_mir: bool,
+    emit_asm: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let stem = file.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+
     let config = jdruby_builder::BuildConfig {
         input_files: vec![file.clone()],
         output_path: output.clone(),
         opt_level,
         debug_info: debug,
+        emit_hir,
+        emit_mir,
+        emit_llvm_ir: emit_ll,
+        verbose,
         ..Default::default()
     };
 
     let pipeline = jdruby_builder::BuildPipeline::new(config);
-    pipeline.build().map_err(|e| e.into())
+    pipeline.build()?;
+
+    // Write .ll file with source name
+    if emit_ll {
+        let ll_path = PathBuf::from(format!("{}.ll", stem));
+        // Already written by the pipeline to output_path.ll
+        eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {}", ll_path.display());
+    }
+
+    // If --emit-asm, generate assembly from the .ll file
+    if emit_asm {
+        let ll_path = output.with_extension("ll");
+        let asm_path = PathBuf::from(format!("{}.s", stem));
+        // Try to invoke llc to get assembly
+        let status = std::process::Command::new("llc")
+            .args([
+                ll_path.to_str().unwrap_or("a.ll"),
+                "-o", asm_path.to_str().unwrap_or("a.s"),
+                "--filetype=asm",
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                eprintln!("\x1b[1;32m✓\x1b[0m Assembly written to {}", asm_path.display());
+            }
+            _ => {
+                eprintln!("\x1b[1;33mwarning\x1b[0m: `llc` not found — install LLVM to emit assembly");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Compile and run a Ruby file via JIT interpreter.
-fn cmd_run(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_run(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = jdruby_builder::BuildConfig {
         input_files: vec![file.clone()],
         output_path: std::path::PathBuf::from("a.out"),
-        verbose: false,
+        verbose,
         ..Default::default()
     };
     let pipeline = jdruby_builder::BuildPipeline::new(config);
@@ -206,9 +263,7 @@ fn line_col_from_offset(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
     for (i, ch) in source.char_indices() {
-        if i >= offset {
-            break;
-        }
+        if i >= offset { break; }
         if ch == '\n' {
             line += 1;
             col = 1;

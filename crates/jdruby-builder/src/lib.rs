@@ -52,12 +52,21 @@ impl BuildPipeline {
         Self { config }
     }
 
+    /// Derive output file stem from input file.
+    fn stem_for(input: &PathBuf) -> String {
+        input.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "output".to_string())
+    }
+
     /// Run the full build pipeline.
     pub fn build(&self) -> Result<(), JDRubyError> {
         let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
         let mut has_errors = false;
 
         for input in &self.config.input_files {
+            let stem = Self::stem_for(input);
+
             if self.config.verbose {
                 eprintln!("\x1b[1;36mCompiling\x1b[0m {}", input.display());
             }
@@ -91,13 +100,20 @@ impl BuildPipeline {
             let mut analyzer = jdruby_semantic::SemanticAnalyzer::new();
             let sem_diags = analyzer.analyze(&program);
             all_diagnostics.extend(sem_diags.iter().cloned());
-            // Semantic warnings don't stop compilation
 
             // 5. AST → HIR
             if self.config.verbose { eprintln!("  → Lowering to HIR..."); }
             let mut hir_module = jdruby_hir::AstLowering::lower(&program);
+
+            // Emit HIR
             if self.config.emit_hir {
-                eprintln!("\n── HIR ──\n{:#?}\n", hir_module);
+                let hir_path = PathBuf::from(format!("{}.hir", stem));
+                let hir_str = format!("{:#?}", hir_module);
+                if let Err(e) = std::fs::write(&hir_path, &hir_str) {
+                    eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", hir_path.display(), e);
+                } else {
+                    eprintln!("\x1b[1;32m✓\x1b[0m HIR written to {}", hir_path.display());
+                }
             }
 
             // 6. HIR Optimization
@@ -107,8 +123,16 @@ impl BuildPipeline {
             // 7. HIR → MIR
             if self.config.verbose { eprintln!("  → Lowering to MIR..."); }
             let mut mir_module = jdruby_mir::HirLowering::lower(&hir_module);
+
+            // Emit MIR
             if self.config.emit_mir {
-                eprintln!("\n── MIR ──\n{:#?}\n", mir_module);
+                let mir_path = PathBuf::from(format!("{}.mir", stem));
+                let mir_str = format!("{:#?}", mir_module);
+                if let Err(e) = std::fs::write(&mir_path, &mir_str) {
+                    eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", mir_path.display(), e);
+                } else {
+                    eprintln!("\x1b[1;32m✓\x1b[0m MIR written to {}", mir_path.display());
+                }
             }
 
             // 8. MIR Optimization
@@ -130,16 +154,12 @@ impl BuildPipeline {
             let mut codegen = jdruby_codegen::CodeGenerator::new(codegen_config);
             match codegen.generate(&mir_module) {
                 Ok(ir) => {
-                    if self.config.emit_llvm_ir {
-                        println!("{}", ir);
-                    }
-                    if self.config.verbose {
-                        eprintln!("  → LLVM IR generated ({} bytes)", ir.len());
-                    }
-                    // Write .ll file
-                    let ll_path = self.config.output_path.with_extension("ll");
+                    // Write .ll file with the source file stem
+                    let ll_path = PathBuf::from(format!("{}.ll", stem));
                     if let Err(e) = std::fs::write(&ll_path, &ir) {
                         eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
+                    } else if self.config.verbose || self.config.emit_llvm_ir {
+                        eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {} ({} bytes)", ll_path.display(), ir.len());
                     }
                 }
                 Err(diags) => {
@@ -211,7 +231,12 @@ impl BuildPipeline {
             // 7. Execute via JIT interpreter
             let mut interpreter = jdruby_jit::interpreter::MirInterpreter::new();
             interpreter.load_module(&mir_module);
+
+            // Print output from the interpreter
             let _result = interpreter.run();
+            for line in &interpreter.output {
+                println!("{}", line);
+            }
         }
 
         if !all_diagnostics.is_empty() {
