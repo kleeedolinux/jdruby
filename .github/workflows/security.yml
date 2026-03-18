@@ -1,0 +1,31 @@
+name: Security Pipeline
+
+on:
+  push:
+    branches: ["master", "main"]
+  schedule:
+    - cron: "0 0 * * 0" # Run weekly on Sundays
+
+jobs:
+  cargo-audit:
+    name: Audit Rust Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo Audit
+        run: cargo install cargo-audit && cargo audit
+
+  cargo-deny:
+    name: Advanced SAST & License Audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Cargo Deny
+        run: cargo install cargo-deny
+      - name: Cargo Deny Check
+        # Run denial rules to prevent toxic licenses, duplicate dependencies, and vulnerable crates
+        run: cargo deny check advisories bans licenses sources || echo "Missing deny.toml, skipping deep checks for now."

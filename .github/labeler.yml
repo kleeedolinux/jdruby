@@ -1,0 +1,32 @@
+# jdruby github labeler configuration
+
+"compiler":
+  - any:
+      - "crates/jdruby-codegen/**/*"
+      - "crates/jdruby-hir/**/*"
+      - "crates/jdruby-mir/**/*"
+      - "crates/jdruby-semantic/**/*"
+
+"runtime":
+  - any:
+      - "crates/jdruby-runtime/**/*"
+      - "crates/jdruby-ffi/**/*"
+
+"gc":
+  - any:
+      - "crates/jdruby-gc/**/*"
+
+"parser":
+  - any:
+      - "crates/jdruby-parser/**/*"
+      - "crates/jdruby-ast/**/*"
+
+"ci":
+  - any:
+      - ".github/workflows/**/*"
+      - ".github/dependabot.yml"
+
+"ruby-specs":
+  - any:
+      - "spec/**/*"
+      - "**/*.rb"

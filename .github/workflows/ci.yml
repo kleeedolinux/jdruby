@@ -1,0 +1,45 @@
+name: JDRuby CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Core Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format Check
+        run: cargo fmt -- --check
+
+      - name: Clippy Lints
+        # Enforcing strict adherence to zero warnings as per JDRuby rules
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build Compiler
+        run: cargo build --verbose
+
+      - name: Run Native Rust Tests
+        run: cargo test --verbose
