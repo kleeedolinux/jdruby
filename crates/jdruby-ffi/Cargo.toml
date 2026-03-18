@@ -1,0 +1,12 @@
+[package]
+name = "jdruby-ffi"
+version.workspace = true
+edition.workspace = true
+description = "C-API compatibility layer (ruby.h shim) for JDRuby — enables native C-extension loading"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-runtime.workspace = true

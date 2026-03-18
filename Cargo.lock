@@ -178,6 +178,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jdruby-ffi"
+version = "0.1.0"
+dependencies = [
+ "jdruby-common",
+ "jdruby-runtime",
+]
+
+[[package]]
 name = "jdruby-hir"
 version = "0.1.0"
 dependencies = [
