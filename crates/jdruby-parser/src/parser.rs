@@ -156,6 +156,42 @@ impl Parser {
             }));
         }
 
+        // ── Postfix modifiers: `expr if cond`, `expr unless cond`, etc. ──
+        if self.check(TokenKind::KwIf) {
+            self.advance();
+            let condition = self.parse_expr()?;
+            let span = start.merge(self.prev_span());
+            return Some(Stmt::If(IfStmt {
+                condition, then_body: vec![Stmt::Expr(ExprStmt { expr, span })],
+                elsif_clauses: vec![], else_body: None, span,
+            }));
+        }
+        if self.check(TokenKind::KwUnless) {
+            self.advance();
+            let condition = self.parse_expr()?;
+            let span = start.merge(self.prev_span());
+            return Some(Stmt::Unless(UnlessStmt {
+                condition, body: vec![Stmt::Expr(ExprStmt { expr, span })],
+                else_body: None, span,
+            }));
+        }
+        if self.check(TokenKind::KwWhile) {
+            self.advance();
+            let condition = self.parse_expr()?;
+            let span = start.merge(self.prev_span());
+            return Some(Stmt::While(WhileStmt {
+                condition, body: vec![Stmt::Expr(ExprStmt { expr, span })], span,
+            }));
+        }
+        if self.check(TokenKind::KwUntil) {
+            self.advance();
+            let condition = self.parse_expr()?;
+            let span = start.merge(self.prev_span());
+            return Some(Stmt::Until(UntilStmt {
+                condition, body: vec![Stmt::Expr(ExprStmt { expr, span })], span,
+            }));
+        }
+
         let span = start.merge(self.prev_span());
         Some(Stmt::Expr(ExprStmt { expr, span }))
     }
@@ -466,6 +502,14 @@ impl Parser {
             if self.check(TokenKind::Dot) {
                 self.advance();
                 expr = self.parse_method_call_on(expr)?;
+                // After a receiver.method(...), check for trailing do..end block
+                if let Expr::MethodCall(call) = expr {
+                    if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
+                        expr = self.parse_block_call(call)?;
+                    } else {
+                        expr = Expr::MethodCall(call);
+                    }
+                }
             } else if self.check(TokenKind::ColonColon) {
                 self.advance();
                 let start = self.prev_span();
@@ -614,25 +658,37 @@ impl Parser {
             let (args, kwargs) = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
             let span = start.merge(self.prev_span());
-            return Some(Expr::MethodCall(MethodCall {
+            let call = MethodCall {
                 receiver: None, method: name, args, kwargs,
                 block_arg: None, span,
-            }));
-        }
-        // Block call
-        if self.check(TokenKind::LBrace) || self.check(TokenKind::KwDo) {
-            let (args, kwargs) = if self.is_arg_start() {
-                self.parse_bare_arg_list()?
-            } else {
-                (vec![], vec![])
             };
-            if self.check(TokenKind::LBrace) || self.check(TokenKind::KwDo) {
-                let call = MethodCall {
-                    receiver: None, method: name, args, kwargs,
-                    block_arg: None, span: start,
-                };
+            // Check for trailing block: `method(args) do ... end` or `method(args) { ... }`
+            if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
                 return self.parse_block_call(call);
             }
+            return Some(Expr::MethodCall(call));
+        }
+        // Block call with no parens: `method do ... end` or `method { ... }`
+        if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
+            let call = MethodCall {
+                receiver: None, method: name, args: vec![], kwargs: vec![],
+                block_arg: None, span: start,
+            };
+            return self.parse_block_call(call);
+        }
+        // Bare method call without parens (e.g. `puts "hello"`) — NOT a block
+        if self.is_arg_start() && !self.check(TokenKind::Newline) && !self.check(TokenKind::Eof) {
+            let (args, kwargs) = self.parse_bare_arg_list()?;
+            let span = start.merge(self.prev_span());
+            let call = MethodCall {
+                receiver: None, method: name, args, kwargs,
+                block_arg: None, span,
+            };
+            // Check for trailing block after bare args
+            if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
+                return self.parse_block_call(call);
+            }
+            return Some(Expr::MethodCall(call));
         }
         Some(Expr::LocalVar(LocalVar { name, span: start }))
     }
@@ -822,6 +878,16 @@ impl Parser {
         let mut kwargs = Vec::new();
         self.skip_newlines();
         while !self.check(end) && !self.is_at_end() {
+            // Block argument: `&block` or `&:symbol`
+            if self.check(TokenKind::Amp) {
+                self.advance();
+                let expr = self.parse_expr()?;
+                args.push(expr); // treat &expr as a regular arg for now
+                self.skip_newlines();
+                if !self.eat(TokenKind::Comma) { break; }
+                self.skip_newlines();
+                continue;
+            }
             // Check for keyword arg: `key: value`
             if self.current_kind() == TokenKind::Identifier && self.peek_at(1) == TokenKind::Colon {
                 let key = self.lexeme();
@@ -843,6 +909,14 @@ impl Parser {
         let mut args = Vec::new();
         let mut kwargs = Vec::new();
         loop {
+            // Block argument: `&block` or `&:symbol`
+            if self.check(TokenKind::Amp) {
+                self.advance();
+                let expr = self.parse_expr()?;
+                args.push(expr);
+                if !self.eat(TokenKind::Comma) { break; }
+                continue;
+            }
             if self.current_kind() == TokenKind::Identifier && self.peek_at(1) == TokenKind::Colon {
                 let key = self.lexeme();
                 self.advance();
@@ -919,10 +993,27 @@ impl Parser {
         let mut params = Vec::new();
         while !self.check(TokenKind::Pipe) && !self.is_at_end() {
             let span = self.current_span();
-            let name = self.expect_ident()?;
-            params.push(Param {
-                name, default: None, kind: ParamKind::Required, span,
-            });
+            // Handle &block param in block params
+            if self.check(TokenKind::Amp) {
+                self.advance();
+                let name = self.expect_ident()?;
+                params.push(Param {
+                    name, default: None, kind: ParamKind::Block,
+                    span: span.merge(self.prev_span()),
+                });
+            } else if self.check(TokenKind::Star) {
+                self.advance();
+                let name = self.expect_ident()?;
+                params.push(Param {
+                    name, default: None, kind: ParamKind::Rest,
+                    span: span.merge(self.prev_span()),
+                });
+            } else {
+                let name = self.expect_ident()?;
+                params.push(Param {
+                    name, default: None, kind: ParamKind::Required, span,
+                });
+            }
             if !self.eat(TokenKind::Comma) { break; }
         }
         Some(params)
@@ -963,7 +1054,17 @@ impl Parser {
             && !self.check(TokenKind::KwEnsure) && !self.check(TokenKind::KwElse)
             && !self.check(TokenKind::KwElsif) && !self.is_at_end()
         {
-            if let Some(s) = self.parse_stmt() { body.push(s); }
+            let pos_before = self.pos;
+            if let Some(s) = self.parse_stmt() {
+                body.push(s);
+            } else {
+                // Prevent infinite loop: if parse_stmt returned None
+                // without advancing, skip the problematic token.
+                if self.pos == pos_before {
+                    self.error(format!("unexpected token in body: {:?}", self.current_kind()));
+                    self.advance();
+                }
+            }
             self.skip_newlines();
         }
         Some(body)
@@ -973,7 +1074,15 @@ impl Parser {
         let mut body = Vec::new();
         self.skip_newlines();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-            if let Some(s) = self.parse_stmt() { body.push(s); }
+            let pos_before = self.pos;
+            if let Some(s) = self.parse_stmt() {
+                body.push(s);
+            } else {
+                if self.pos == pos_before {
+                    self.error(format!("unexpected token in block: {:?}", self.current_kind()));
+                    self.advance();
+                }
+            }
             self.skip_newlines();
         }
         Some(body)
