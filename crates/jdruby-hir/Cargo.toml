@@ -1,0 +1,9 @@
+[package]
+name = "jdruby-hir"
+version.workspace = true
+edition.workspace = true
+description = "High-Level Intermediate Representation for JDRuby"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-ast.workspace = true

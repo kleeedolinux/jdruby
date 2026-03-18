@@ -1,0 +1,8 @@
+[package]
+name = "jdruby-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Ruby runtime for JDRuby — object model, GC, green threads"
+
+[dependencies]
+jdruby-common.workspace = true

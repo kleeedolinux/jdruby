@@ -1,0 +1,9 @@
+[package]
+name = "jdruby-mir"
+version.workspace = true
+edition.workspace = true
+description = "Mid-Level Intermediate Representation for JDRuby"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-hir.workspace = true

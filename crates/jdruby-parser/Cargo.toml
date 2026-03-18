@@ -1,0 +1,10 @@
+[package]
+name = "jdruby-parser"
+version.workspace = true
+edition.workspace = true
+description = "Ruby parser for JDRuby — tokens to AST"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-lexer.workspace = true
+jdruby-ast.workspace = true

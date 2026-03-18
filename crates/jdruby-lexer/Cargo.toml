@@ -1,0 +1,11 @@
+[package]
+name = "jdruby-lexer"
+version.workspace = true
+edition.workspace = true
+description = "Ruby tokenizer/lexer for JDRuby"
+
+[dependencies]
+jdruby-common.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1"

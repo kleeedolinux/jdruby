@@ -1,0 +1,10 @@
+[package]
+name = "jdruby-codegen"
+version.workspace = true
+edition.workspace = true
+description = "LLVM IR code generation for JDRuby"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-mir.workspace = true
+# inkwell.workspace = true  # Uncomment when LLVM is available

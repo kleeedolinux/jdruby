@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jdruby",
+    "crates/jdruby-common",
+    "crates/jdruby-lexer",
+    "crates/jdruby-ast",
+    "crates/jdruby-parser",
+    "crates/jdruby-semantic",
+    "crates/jdruby-hir",
+    "crates/jdruby-mir",
+    "crates/jdruby-codegen",
+    "crates/jdruby-runtime",
+    "crates/jdruby-builder",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["JDRuby Contributors"]
+license = "MIT"
+repository = "https://github.com/jdruby/jdruby"
+description = "A full native Ruby compiler and runtime implemented in Rust"
+
+[workspace.dependencies]
+# Internal crates
+jdruby-common = { path = "crates/jdruby-common" }
+jdruby-lexer = { path = "crates/jdruby-lexer" }
+jdruby-ast = { path = "crates/jdruby-ast" }
+jdruby-parser = { path = "crates/jdruby-parser" }
+jdruby-semantic = { path = "crates/jdruby-semantic" }
+jdruby-hir = { path = "crates/jdruby-hir" }
+jdruby-mir = { path = "crates/jdruby-mir" }
+jdruby-codegen = { path = "crates/jdruby-codegen" }
+jdruby-runtime = { path = "crates/jdruby-runtime" }
+jdruby-builder = { path = "crates/jdruby-builder" }
+
+# External dependencies
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+ariadne = "0.4"
+inkwell = { version = "0.5", features = ["llvm18-0"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

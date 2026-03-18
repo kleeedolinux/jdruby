@@ -1,0 +1,9 @@
+[package]
+name = "jdruby-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared types for the JDRuby compiler: spans, diagnostics, errors"
+
+[dependencies]
+thiserror.workspace = true
+ariadne.workspace = true

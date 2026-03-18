@@ -1,0 +1,18 @@
+[package]
+name = "jdruby"
+version.workspace = true
+edition.workspace = true
+description = "JDRuby — A full native Ruby compiler and runtime"
+
+[[bin]]
+name = "jdruby"
+path = "src/main.rs"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-lexer.workspace = true
+jdruby-ast.workspace = true
+jdruby-parser.workspace = true
+jdruby-builder.workspace = true
+clap.workspace = true
+ariadne.workspace = true

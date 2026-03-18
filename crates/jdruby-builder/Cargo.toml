@@ -1,0 +1,15 @@
+[package]
+name = "jdruby-builder"
+version.workspace = true
+edition.workspace = true
+description = "Build orchestrator for JDRuby — compilation pipeline and linking"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-lexer.workspace = true
+jdruby-parser.workspace = true
+jdruby-semantic.workspace = true
+jdruby-hir.workspace = true
+jdruby-mir.workspace = true
+jdruby-codegen.workspace = true
+jdruby-runtime.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "jdruby-semantic"
+version.workspace = true
+edition.workspace = true
+description = "Semantic analysis for JDRuby — type checking, symbol resolution"
+
+[dependencies]
+jdruby-common.workspace = true
+jdruby-ast.workspace = true

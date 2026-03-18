@@ -1,0 +1,8 @@
+[package]
+name = "jdruby-ast"
+version.workspace = true
+edition.workspace = true
+description = "AST node definitions for JDRuby"
+
+[dependencies]
+jdruby-common.workspace = true
