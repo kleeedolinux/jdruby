@@ -85,4 +85,14 @@ impl Diagnostic {
         self.help = Some(help.into());
         self
     }
+
+    /// Returns `true` if this diagnostic is an error.
+    pub fn is_error(&self) -> bool {
+        self.severity == DiagnosticSeverity::Error
+    }
+
+    /// Returns `true` if this diagnostic is a warning.
+    pub fn is_warning(&self) -> bool {
+        self.severity == DiagnosticSeverity::Warning
+    }
 }

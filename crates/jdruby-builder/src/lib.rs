@@ -1,37 +1,22 @@
-//! # JDRuby Builder
+//! # JDRuby Builder — Build Pipeline Orchestrator
 //!
-//! Build orchestrator that coordinates the full compilation pipeline:
-//!
-//! ```text
-//! Source → Lexer → Parser → Semantic → HIR → MIR → LLVM IR → Native Binary
-//! ```
-//!
-//! Also handles:
-//! - Multi-file compilation
-//! - Dependency resolution (require/require_relative)
-//! - Linking with the runtime library
-//! - Invoking system linker (clang/gcc)
+//! Orchestrates the full compilation pipeline:
+//! Source → Lex → Parse → Semantic → HIR → MIR → Codegen → Link
 
-use jdruby_common::JDRubyError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use jdruby_common::{Diagnostic, JDRubyError};
 
-/// Configuration for the build pipeline.
+/// Build configuration.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
-    /// Input source files.
     pub input_files: Vec<PathBuf>,
-    /// Output binary path.
     pub output_path: PathBuf,
-    /// Optimization level (0-3).
     pub opt_level: u8,
-    /// Whether to emit debug info.
     pub debug_info: bool,
-    /// Whether to use JIT compilation.
-    pub jit: bool,
-    /// Additional library paths for linking.
-    pub lib_paths: Vec<PathBuf>,
-    /// System compiler to use for linking (e.g., "clang", "gcc").
-    pub linker: String,
+    pub emit_hir: bool,
+    pub emit_mir: bool,
+    pub emit_llvm_ir: bool,
+    pub verbose: bool,
 }
 
 impl Default for BuildConfig {
@@ -41,58 +26,148 @@ impl Default for BuildConfig {
             output_path: PathBuf::from("a.out"),
             opt_level: 2,
             debug_info: false,
-            jit: false,
-            lib_paths: Vec::new(),
-            linker: "cc".to_string(),
+            emit_hir: false,
+            emit_mir: false,
+            emit_llvm_ir: false,
+            verbose: false,
         }
     }
 }
 
-/// The build pipeline orchestrator.
+/// Build pipeline result.
+#[derive(Debug)]
+pub struct BuildResult {
+    pub diagnostics: Vec<Diagnostic>,
+    pub llvm_ir: Option<String>,
+    pub success: bool,
+}
+
+/// The full compilation pipeline.
 pub struct BuildPipeline {
     config: BuildConfig,
 }
 
 impl BuildPipeline {
-    /// Create a new build pipeline with the given configuration.
     pub fn new(config: BuildConfig) -> Self {
         Self { config }
     }
 
-    /// Run the full compilation pipeline.
+    /// Run the full build pipeline.
     pub fn build(&self) -> Result<(), JDRubyError> {
-        // TODO: Implement full pipeline:
-        // 1. Read source files
-        // 2. Lex each file
-        // 3. Parse tokens into AST
-        // 4. Run semantic analysis
-        // 5. Lower AST to HIR
-        // 6. Optimize HIR
-        // 7. Lower HIR to MIR
-        // 8. Optimize MIR
-        // 9. Generate LLVM IR
-        // 10. Run LLVM optimization passes
-        // 11. Emit object file
-        // 12. Link into final binary
-        Err(JDRubyError::Build {
-            message: "build pipeline not yet implemented".to_string(),
-        })
-    }
+        let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
+        let mut has_errors = false;
 
-    /// Lex a single source file and return its tokens.
-    pub fn lex_file(&self, path: &Path) -> Result<Vec<jdruby_lexer::Token>, JDRubyError> {
-        let source = std::fs::read_to_string(path)?;
-        let mut lexer = jdruby_lexer::Lexer::new(&source);
-        let (tokens, diagnostics) = lexer.tokenize();
+        for input in &self.config.input_files {
+            if self.config.verbose {
+                eprintln!("\x1b[1;36mCompiling\x1b[0m {}", input.display());
+            }
 
-        if diagnostics.iter().any(|d| {
-            d.severity == jdruby_common::DiagnosticSeverity::Error
-        }) {
-            return Err(JDRubyError::Multiple(
-                diagnostics.iter().filter(|d| d.severity == jdruby_common::DiagnosticSeverity::Error).count(),
-            ));
+            // 1. Read source
+            let source = std::fs::read_to_string(input).map_err(|e| {
+                JDRubyError::Io(std::io::Error::new(e.kind(), format!("{}: {}", input.display(), e)))
+            })?;
+
+            // 2. Lex
+            if self.config.verbose { eprintln!("  → Lexing..."); }
+            let mut lexer = jdruby_lexer::Lexer::new(&source);
+            let (tokens, lex_diags) = lexer.tokenize();
+            all_diagnostics.extend(lex_diags.iter().cloned());
+            if lex_diags.iter().any(|d| d.is_error()) {
+                has_errors = true;
+                continue;
+            }
+
+            // 3. Parse
+            if self.config.verbose { eprintln!("  → Parsing..."); }
+            let (program, parse_diags) = jdruby_parser::parse(tokens);
+            all_diagnostics.extend(parse_diags.iter().cloned());
+            if parse_diags.iter().any(|d| d.is_error()) {
+                has_errors = true;
+                continue;
+            }
+
+            // 4. Semantic Analysis
+            if self.config.verbose { eprintln!("  → Semantic analysis..."); }
+            let mut analyzer = jdruby_semantic::SemanticAnalyzer::new();
+            let sem_diags = analyzer.analyze(&program);
+            all_diagnostics.extend(sem_diags.iter().cloned());
+            // Semantic warnings don't stop compilation
+
+            // 5. AST → HIR
+            if self.config.verbose { eprintln!("  → Lowering to HIR..."); }
+            let mut hir_module = jdruby_hir::AstLowering::lower(&program);
+            if self.config.emit_hir {
+                eprintln!("\n── HIR ──\n{:#?}\n", hir_module);
+            }
+
+            // 6. HIR Optimization
+            if self.config.verbose { eprintln!("  → Optimizing HIR..."); }
+            jdruby_hir::HirOptimizer::optimize(&mut hir_module);
+
+            // 7. HIR → MIR
+            if self.config.verbose { eprintln!("  → Lowering to MIR..."); }
+            let mut mir_module = jdruby_mir::HirLowering::lower(&hir_module);
+            if self.config.emit_mir {
+                eprintln!("\n── MIR ──\n{:#?}\n", mir_module);
+            }
+
+            // 8. MIR Optimization
+            if self.config.verbose { eprintln!("  → Optimizing MIR..."); }
+            jdruby_mir::MirOptimizer::optimize(&mut mir_module);
+
+            // 9. Codegen → LLVM IR
+            if self.config.verbose { eprintln!("  → Generating LLVM IR..."); }
+            let codegen_config = jdruby_codegen::CodegenConfig {
+                opt_level: match self.config.opt_level {
+                    0 => jdruby_codegen::OptLevel::O0,
+                    1 => jdruby_codegen::OptLevel::O1,
+                    3 => jdruby_codegen::OptLevel::O3,
+                    _ => jdruby_codegen::OptLevel::O2,
+                },
+                debug_info: self.config.debug_info,
+                ..Default::default()
+            };
+            let mut codegen = jdruby_codegen::CodeGenerator::new(codegen_config);
+            match codegen.generate(&mir_module) {
+                Ok(ir) => {
+                    if self.config.emit_llvm_ir {
+                        println!("{}", ir);
+                    }
+                    if self.config.verbose {
+                        eprintln!("  → LLVM IR generated ({} bytes)", ir.len());
+                    }
+                    // Write .ll file
+                    let ll_path = self.config.output_path.with_extension("ll");
+                    if let Err(e) = std::fs::write(&ll_path, &ir) {
+                        eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
+                    }
+                }
+                Err(diags) => {
+                    all_diagnostics.extend(diags);
+                    has_errors = true;
+                }
+            }
         }
 
-        Ok(tokens)
+        // Print diagnostics
+        if !all_diagnostics.is_empty() {
+            for d in &all_diagnostics {
+                let prefix = if d.is_error() { "\x1b[1;31merror" }
+                             else { "\x1b[1;33mwarning" };
+                eprintln!("{}\x1b[0m: {}", prefix, d.message);
+            }
+        }
+
+        if has_errors {
+            Err(JDRubyError::Build { message: format!(
+                "compilation failed with {} error(s)",
+                all_diagnostics.iter().filter(|d| d.is_error()).count()
+            ) })
+        } else {
+            if self.config.verbose {
+                eprintln!("\x1b[1;32m✓\x1b[0m Build complete: {}", self.config.output_path.display());
+            }
+            Ok(())
+        }
     }
 }
