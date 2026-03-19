@@ -677,11 +677,6 @@ impl CodeGenerator {
                     "  %r{} = call i64 @jdruby_class_new(i8* %cls_name_{}, i64 %sc_val_{})\n",
                     dest, dest, dest
                 ));
-                // Add store instruction to initialize the class constant explicitly!
-                out.push_str(&format!(
-                    "  store i64 %r{}, i64* @{}, align 8\n",
-                    dest, sanitize_name(name)
-                ));
             }
             MirInst::DefMethod(class_reg, method_name, func_name) => {
                 let meth_const = self.string_pool.get(method_name.as_str()).unwrap();

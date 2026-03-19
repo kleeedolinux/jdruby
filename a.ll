@@ -121,14 +121,12 @@ entry_0:
   %sc_val_0 = load i64, i64* @JDRUBY_NIL, align 8
   %r0 = call i64 @jdruby_class_new(i8* %cls_name_0, i64 %sc_val_0)
   store i64 %r0, i64* @Logger, align 8
-  store i64 %r0, i64* @Logger, align 8
   %def_meth_log_Logger__log = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %def_func_log_Logger__log = getelementptr inbounds [11 x i8], [11 x i8]* @.str.2, i64 0, i64 0
   call void @jdruby_def_method(i64 %r0, i8* %def_meth_log_Logger__log, i8* %def_func_log_Logger__log)
   %cls_name_1 = getelementptr inbounds [5 x i8], [5 x i8]* @.str.3, i64 0, i64 0
   %sc_val_1 = load i64, i64* @JDRUBY_NIL, align 8
   %r1 = call i64 @jdruby_class_new(i8* %cls_name_1, i64 %sc_val_1)
-  store i64 %r1, i64* @Task, align 8
   store i64 %r1, i64* @Task, align 8
   %inc_mod_Logger = getelementptr inbounds [7 x i8], [7 x i8]* @.str.0, i64 0, i64 0
   %inc_mod_val_Logger = call i64 @jdruby_const_get(i8* %inc_mod_Logger)
@@ -143,7 +141,6 @@ entry_0:
   %cls_name_2 = getelementptr inbounds [10 x i8], [10 x i8]* @.str.9, i64 0, i64 0
   %sc_val_2 = load i64, i64* @JDRUBY_NIL, align 8
   %r2 = call i64 @jdruby_class_new(i8* %cls_name_2, i64 %sc_val_2)
-  store i64 %r2, i64* @Scheduler, align 8
   store i64 %r2, i64* @Scheduler, align 8
   %inc_mod_Logger = getelementptr inbounds [7 x i8], [7 x i8]* @.str.0, i64 0, i64 0
   %inc_mod_val_Logger = call i64 @jdruby_const_get(i8* %inc_mod_Logger)
@@ -308,8 +305,8 @@ entry_0:
 define i64 @Scheduler__add_task(i64 %r0, i64 %r1, i64 %r2) {
 entry_allocas:
   %local_name = alloca i64, align 8
-  %local_block = alloca i64, align 8
   %local_task = alloca i64, align 8
+  %local_block = alloca i64, align 8
   br label %entry_0
 
 entry_0:
