@@ -7,28 +7,35 @@ pub struct HirLowering {
     next_block: u32,
     current_blocks: Vec<MirBlock>,
     current_insts: Vec<MirInst>,
+    /// Pending label for the next block (set by start_block)
+    pending_label: Option<BlockLabel>,
 }
 
 impl HirLowering {
     pub fn new() -> Self {
-        Self { next_reg: 0, next_block: 0, current_blocks: Vec::new(), current_insts: Vec::new() }
+        Self {
+            next_reg: 0,
+            next_block: 0,
+            current_blocks: Vec::new(),
+            current_insts: Vec::new(),
+            pending_label: None,
+        }
     }
 
     pub fn lower(module: &HirModule) -> MirModule {
         let mut lowering = Self::new();
         let mut functions = Vec::new();
 
-        // Collect top-level code into a `main` function
-        let main_body: Vec<&HirNode> = module.nodes.iter()
-            .filter(|n| !matches!(n, HirNode::FuncDef(_) | HirNode::ClassDef(_)))
-            .collect();
+        // Collect ALL top-level code into a `main` function,
+        // including class/module definitions (they emit registration instructions)
+        let main_body: Vec<&HirNode> = module.nodes.iter().collect();
 
         if !main_body.is_empty() {
             let func = lowering.lower_function("main", &[], &main_body);
             functions.push(func);
         }
 
-        // Lower named functions
+        // Lower named functions (standalone defs outside classes)
         for node in &module.nodes {
             if let HirNode::FuncDef(def) = node {
                 let body_refs: Vec<&HirNode> = def.body.iter().collect();
@@ -39,8 +46,11 @@ impl HirLowering {
                 for cn in &cls.body {
                     if let HirNode::FuncDef(def) = cn {
                         let qualified = format!("{}#{}", cls.name, def.name);
+                        // Add implicit `self` parameter for instance methods
+                        let mut params = vec!["self".to_string()];
+                        params.extend(def.params.iter().cloned());
                         let body_refs: Vec<&HirNode> = def.body.iter().collect();
-                        let func = lowering.lower_function(&qualified, &def.params, &body_refs);
+                        let func = lowering.lower_function(&qualified, &params, &body_refs);
                         functions.push(func);
                     }
                 }
@@ -55,6 +65,7 @@ impl HirLowering {
         self.next_block = 0;
         self.current_blocks = Vec::new();
         self.current_insts = Vec::new();
+        self.pending_label = None;
 
         // Allocate registers for parameters
         let param_regs: Vec<RegId> = params.iter().map(|p| {
@@ -98,7 +109,6 @@ impl HirLowering {
                     HirLiteralValue::Bool(v) => MirConst::Bool(*v),
                     HirLiteralValue::Nil => MirConst::Nil,
                     HirLiteralValue::Array(elems) => {
-                        // Lower array elements, then call Array.new
                         let elem_regs: Vec<RegId> = elems.iter().map(|e| self.lower_node(e)).collect();
                         self.emit(MirInst::Call(reg, "rb_ary_new".into(), elem_regs));
                         return reg;
@@ -178,7 +188,6 @@ impl HirLowering {
 
                 // Merge block
                 self.start_block(merge_label);
-                // Use the last result (simplified — a real impl uses phi nodes)
                 let result = self.alloc_reg();
                 self.emit(MirInst::Copy(result, then_result));
                 result
@@ -215,11 +224,28 @@ impl HirLowering {
                 self.emit(MirInst::LoadConst(reg, MirConst::Nil));
                 reg
             }
-            HirNode::FuncDef(_) | HirNode::ClassDef(_) => {
-                // Handled at module level
+            HirNode::FuncDef(_) => {
+                // Standalone functions are handled at module level; emit Nil in main
                 let reg = self.alloc_reg();
                 self.emit(MirInst::LoadConst(reg, MirConst::Nil));
                 reg
+            }
+            HirNode::ClassDef(cls) => {
+                // Emit class registration instructions
+                let class_reg = self.alloc_reg();
+                self.emit(MirInst::ClassNew(class_reg, cls.name.clone(), cls.superclass.clone()));
+                // Store class as a constant
+                self.emit(MirInst::Store(cls.name.clone(), class_reg));
+
+                // Register each method defined in the class body
+                for node in &cls.body {
+                    if let HirNode::FuncDef(def) = node {
+                        let qualified = format!("{}#{}", cls.name, def.name);
+                        self.emit(MirInst::DefMethod(class_reg, def.name.clone(), qualified));
+                    }
+                }
+
+                class_reg
             }
             HirNode::Seq(nodes) => {
                 let mut last = self.alloc_reg();
@@ -263,7 +289,9 @@ impl HirLowering {
     }
 
     fn finish_block(&mut self, terminator: MirTerminator) {
-        let label = if self.current_blocks.is_empty() && self.current_insts.len() > 0 || self.current_blocks.is_empty() {
+        let label = if let Some(lbl) = self.pending_label.take() {
+            lbl
+        } else if self.current_blocks.is_empty() {
             format!("entry_{}", self.current_blocks.len())
         } else {
             format!("bb_{}", self.current_blocks.len())
@@ -276,17 +304,8 @@ impl HirLowering {
     }
 
     fn start_block(&mut self, label: BlockLabel) {
-        // The label is already generated; we just ensure current_insts is empty
-        // and the next finish_block will use this label
-        if !self.current_insts.is_empty() {
-            self.finish_block(MirTerminator::Branch(label.clone()));
-        }
-        // Push an empty block with the label (will be filled on finish)
-        self.current_blocks.push(MirBlock {
-            label,
-            instructions: Vec::new(),
-            terminator: MirTerminator::Unreachable,
-        });
+        // Set the pending label — the next finish_block will use it
+        self.pending_label = Some(label);
     }
 
     fn convert_binop(op: &HirOp) -> MirBinOp {

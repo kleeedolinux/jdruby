@@ -227,12 +227,24 @@ impl AstLowering {
             Expr::SelfExpr(s) => HirNode::VarRef(HirVarRef {
                 name: "self".into(), scope: VarScope::Local, span: s.span,
             }),
-            Expr::BinaryOp(op) => HirNode::BinOp(Box::new(HirBinOp {
-                left: Self::lower_expr(&op.left),
-                op: Self::lower_binop(&op.op),
-                right: Self::lower_expr(&op.right),
-                span: op.span,
-            })),
+            Expr::BinaryOp(op) => {
+                // Ruby `<<` is a method call, not a bitshift
+                if op.op == BinOperator::Shl {
+                    return HirNode::Call(Box::new(HirCall {
+                        receiver: Some(Self::lower_expr(&op.left)),
+                        method: "<<".into(),
+                        args: vec![Self::lower_expr(&op.right)],
+                        block: None,
+                        span: op.span,
+                    }));
+                }
+                HirNode::BinOp(Box::new(HirBinOp {
+                    left: Self::lower_expr(&op.left),
+                    op: Self::lower_binop(&op.op),
+                    right: Self::lower_expr(&op.right),
+                    span: op.span,
+                }))
+            }
             Expr::UnaryOp(op) => HirNode::UnOp(Box::new(HirUnOp {
                 op: match op.op {
                     UnOperator::Neg | UnOperator::Pos => HirUnaryOp::Neg,
@@ -296,9 +308,7 @@ impl AstLowering {
                 args: vec![Self::lower_expr(&d.expr)],
                 block: None, span: d.span,
             })),
-            Expr::InterpolatedString(s) => HirNode::Literal(HirLiteral {
-                value: HirLiteralValue::String("<interpolated>".into()), span: s.span,
-            }),
+            Expr::InterpolatedString(s) => Self::lower_interpolated_string(s),
             Expr::RegexLit(r) => HirNode::Literal(HirLiteral {
                 value: HirLiteralValue::String(r.pattern.clone()), span: r.span,
             }),
@@ -332,7 +342,7 @@ impl AstLowering {
             BinOperator::BitAnd => HirOp::BitAnd,
             BinOperator::BitOr => HirOp::BitOr,
             BinOperator::BitXor => HirOp::BitXor,
-            BinOperator::Shl => HirOp::Shl,
+            BinOperator::Shl => HirOp::Shl, // only reached for non-Ruby-<< contexts
             BinOperator::Shr => HirOp::Shr,
             BinOperator::Range | BinOperator::RangeExcl => HirOp::Add, // handled separately
         }
@@ -348,5 +358,49 @@ impl AstLowering {
             AssignTarget::Index(_, _) => HirVarRef { name: "<index>".into(), scope: VarScope::Local, span },
             AssignTarget::Attribute(_, attr) => HirVarRef { name: attr.clone(), scope: VarScope::Instance, span },
         }
+    }
+
+    /// Lower interpolated string: `"hello #{expr}"` → concat chain
+    fn lower_interpolated_string(s: &InterpolatedString) -> HirNode {
+        let mut parts: Vec<HirNode> = Vec::new();
+        for part in &s.parts {
+            match part {
+                StringPart::Literal(text) => {
+                    parts.push(HirNode::Literal(HirLiteral {
+                        value: HirLiteralValue::String(text.clone()),
+                        span: s.span,
+                    }));
+                }
+                StringPart::Interpolation(expr) => {
+                    // Wrap in to_s call for non-string expressions
+                    let lowered = Self::lower_expr(expr);
+                    parts.push(HirNode::Call(Box::new(HirCall {
+                        receiver: Some(lowered),
+                        method: "to_s".into(),
+                        args: vec![],
+                        block: None,
+                        span: s.span,
+                    })));
+                }
+            }
+        }
+
+        if parts.is_empty() {
+            return HirNode::Literal(HirLiteral {
+                value: HirLiteralValue::String(String::new()),
+                span: s.span,
+            });
+        }
+
+        let mut result = parts.remove(0);
+        for part in parts {
+            result = HirNode::BinOp(Box::new(HirBinOp {
+                left: result,
+                op: HirOp::Add, // String concatenation
+                right: part,
+                span: s.span,
+            }));
+        }
+        result
     }
 }

@@ -36,6 +36,12 @@ pub enum MirInst {
     Load(RegId, String),
     Store(String, RegId),
     Alloc(RegId, String),
+    /// Create a new class: dest = class_new(name, superclass_name)
+    ClassNew(RegId, String, Option<String>),
+    /// Register a method on a class: def_method(class_reg, method_name, func_name)
+    DefMethod(RegId, String, String),
+    /// Include a module into a class: include_module(class_reg, module_name)
+    IncludeModule(RegId, String),
     Nop,
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Register-based flat IR ready for LLVM translation.
 
-mod nodes;
+pub mod nodes;
 mod lower;
 mod optimize;
 

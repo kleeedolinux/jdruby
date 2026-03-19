@@ -4,7 +4,7 @@
 //! baseline execution engine before a method is JIT-compiled.
 
 use std::collections::HashMap;
-use jdruby_mir::{MirModule, MirFunction, MirBlock, MirInst, MirTerminator, MirConst, MirBinOp, MirUnOp};
+use jdruby_mir::{MirModule, MirFunction, MirInst, MirTerminator, MirConst, MirBinOp, MirUnOp};
 
 /// Runtime value in the interpreter.
 #[derive(Debug, Clone)]
@@ -85,6 +85,10 @@ pub struct MirInterpreter {
     variables: HashMap<String, IrValue>,
     /// Function table: name → MirFunction
     functions: HashMap<String, MirFunction>,
+    /// Class method table: class_name → { method_name → func_name }
+    class_methods: HashMap<String, HashMap<String, String>>,
+    /// Instance variables: object_id → { ivar_name → value }
+    instance_vars: HashMap<u64, HashMap<String, IrValue>>,
     /// Output buffer for puts/print/p
     pub output: Vec<String>,
     /// Next object ID for allocation
@@ -97,6 +101,8 @@ impl MirInterpreter {
             registers: HashMap::new(),
             variables: HashMap::new(),
             functions: HashMap::new(),
+            class_methods: HashMap::new(),
+            instance_vars: HashMap::new(),
             output: Vec::new(),
             next_obj_id: 1,
         }
@@ -221,6 +227,24 @@ impl MirInterpreter {
             MirInst::Alloc(reg, _name) => {
                 self.registers.insert(*reg, IrValue::Nil);
             }
+            MirInst::ClassNew(reg, name, _superclass) => {
+                // Create a class value (represented as Object with class name)
+                let class_val = IrValue::Object(name.clone(), 0);
+                self.registers.insert(*reg, class_val);
+                // Initialize method table for this class
+                self.class_methods.entry(name.clone()).or_insert_with(HashMap::new);
+            }
+            MirInst::DefMethod(_, method_name, func_name) => {
+                // Look up which class this belongs to from the func_name pattern "Class#method"
+                let class_name = func_name.split('#').next().unwrap_or("").to_string();
+                self.class_methods
+                    .entry(class_name)
+                    .or_insert_with(HashMap::new)
+                    .insert(method_name.clone(), func_name.clone());
+            }
+            MirInst::IncludeModule(_, _module_name) => {
+                // Module inclusion is a no-op in the basic interpreter for now
+            }
             MirInst::Nop => {}
         }
     }
@@ -292,26 +316,39 @@ impl MirInterpreter {
             "puts" => {
                 for arg in args {
                     let s = arg.to_ruby_s();
-                    self.output.push(s.clone());
-                    println!("{}", s);
+                    self.output.push(s);
                 }
                 IrValue::Nil
             }
             "print" => {
                 for arg in args {
                     let s = arg.to_ruby_s();
-                    self.output.push(s.clone());
-                    print!("{}", s);
+                    self.output.push(s);
                 }
                 IrValue::Nil
             }
             "p" => {
                 for arg in args {
                     let s = arg.inspect();
-                    self.output.push(s.clone());
-                    println!("{}", s);
+                    self.output.push(s);
                 }
                 args.first().cloned().unwrap_or(IrValue::Nil)
+            }
+            "rb_ary_new" => {
+                IrValue::Array(args.to_vec())
+            }
+            "rb_hash_new" => {
+                let mut entries = Vec::new();
+                let mut i = 0;
+                while i + 1 < args.len() {
+                    entries.push((args[i].clone(), args[i + 1].clone()));
+                    i += 2;
+                }
+                IrValue::Hash(entries)
+            }
+            "rb_yield" => {
+                // Yield is a no-op in the interpreter for now
+                IrValue::Nil
             }
             _ => {
                 // Try user-defined function
@@ -411,16 +448,56 @@ impl MirInterpreter {
             (_, "freeze") => recv.clone(),
             (_, "frozen?") => IrValue::Bool(false),
             _ => {
-                // Try calling as a class method: Class.method → Class__method
+                // Check if receiver is a class object (id == 0) and method is "new"
+                if let IrValue::Object(class_name, 0) = recv {
+                    if method == "new" {
+                        // Allocate a new instance
+                        let obj_id = self.next_obj_id;
+                        self.next_obj_id += 1;
+                        let instance = IrValue::Object(class_name.clone(), obj_id);
+
+                        // Call initialize if it exists
+                        let init_func_name = format!("{}#initialize", class_name);
+                        if let Some(func) = self.functions.get(&init_func_name).cloned() {
+                            let mut init_args = vec![instance.clone()];
+                            init_args.extend(args.iter().cloned());
+                            self.call_function(&func, &init_args);
+                        }
+                        return instance;
+                    }
+                    // Class method dispatch (e.g., Scheduler.create_task_type)
+                    let class_method = format!("{}#{}", class_name, method);
+                    if let Some(func) = self.functions.get(&class_method).cloned() {
+                        let mut all_args = vec![recv.clone()];
+                        all_args.extend(args.iter().cloned());
+                        return self.call_function(&func, &all_args);
+                    }
+                }
+
+                // Instance method dispatch via class_methods table
+                if let IrValue::Object(class_name, _obj_id) = recv {
+                    if let Some(methods) = self.class_methods.get(class_name).cloned() {
+                        if let Some(func_name) = methods.get(method) {
+                            if let Some(func) = self.functions.get(func_name).cloned() {
+                                let mut all_args = vec![recv.clone()];
+                                all_args.extend(args.iter().cloned());
+                                return self.call_function(&func, &all_args);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: try calling as a qualified function
                 let recv_name = recv.to_ruby_s();
                 let full_name = format!("{}::{}", recv_name, method);
                 if let Some(func) = self.functions.get(&full_name).cloned() {
                     self.call_function(&func, args)
                 } else {
-                    // Try with __ separator
-                    let alt_name = format!("{}__{}", recv_name, method);
+                    let alt_name = format!("{}#{}", recv_name, method);
                     if let Some(func) = self.functions.get(&alt_name).cloned() {
-                        self.call_function(&func, args)
+                        let mut all_args = vec![recv.clone()];
+                        all_args.extend(args.iter().cloned());
+                        self.call_function(&func, &all_args)
                     } else {
                         IrValue::Nil
                     }

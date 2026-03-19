@@ -5,7 +5,7 @@
 //! and global variable declarations.
 
 use std::collections::{HashMap, HashSet};
-use jdruby_common::{Diagnostic, SourceSpan};
+use jdruby_common::Diagnostic;
 use jdruby_mir::{MirModule, MirFunction, MirBlock, MirInst, MirTerminator, MirConst, MirBinOp, MirUnOp};
 
 /// Code generation configuration.
@@ -136,6 +136,20 @@ impl CodeGenerator {
                                 "@{} = internal global i64 0, align 8\n", sname
                             ));
                         }
+                    }
+                    MirInst::ClassNew(_, name, superclass) => {
+                        self.intern_string(name);
+                        if let Some(sc) = superclass {
+                            self.intern_string(sc);
+                        }
+                    }
+                    MirInst::DefMethod(_, method_name, func_name) => {
+                        self.intern_string(method_name);
+                        self.intern_string(func_name);
+                    }
+                    MirInst::IncludeModule(_, module_name) => {
+                        self.intern_string(module_name);
+                        self.intern_string("include");
                     }
                     _ => {}
                 }
@@ -534,8 +548,8 @@ impl CodeGenerator {
                     ));
                 } else {
                     // Inline the method name string
-                    let escaped = llvm_escape_string(method);
-                    let mlen = method.len() + 1;
+                    let _escaped = llvm_escape_string(method);
+                    let _mlen = method.len() + 1;
                     out.push_str(&format!(
                         "  ; method: {}\n", method
                     ));
@@ -579,6 +593,81 @@ impl CodeGenerator {
                 ));
                 out.push_str(&format!(
                     "  %r{} = ptrtoint i64* %alloca_{} to i64\n", reg, reg
+                ));
+            }
+            MirInst::ClassNew(dest, name, superclass) => {
+                let name_const = self.string_pool.get(name.as_str()).unwrap();
+                let name_len = name.len() + 1;
+                out.push_str(&format!(
+                    "  %cls_name_{d} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                    d = dest, l = name_len, n = name_const
+                ));
+                let super_val = if let Some(sc) = superclass {
+                    let sc_const = self.string_pool.get(sc.as_str()).unwrap();
+                    let sc_len = sc.len() + 1;
+                    out.push_str(&format!(
+                        "  %cls_super_{d} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                        d = dest, l = sc_len, n = sc_const
+                    ));
+                    out.push_str(&format!(
+                        "  %cls_super_val_{d} = call i64 @jdruby_const_get(i8* %cls_super_{d})\n",
+                        d = dest
+                    ));
+                    format!("%cls_super_val_{}", dest)
+                } else {
+                    let nil_reg = format!("cls_nil_{}", dest);
+                    out.push_str(&format!(
+                        "  %{} = load i64, i64* @JDRUBY_NIL, align 8\n", nil_reg
+                    ));
+                    format!("%{}", nil_reg)
+                };
+                out.push_str(&format!(
+                    "  %r{} = call i64 @jdruby_class_new(i8* %cls_name_{}, i64 {})\n",
+                    dest, dest, super_val
+                ));
+            }
+            MirInst::DefMethod(class_reg, method_name, func_name) => {
+                let meth_const = self.string_pool.get(method_name.as_str()).unwrap();
+                let meth_len = method_name.len() + 1;
+                let func_const = self.string_pool.get(func_name.as_str()).unwrap();
+                let func_len = func_name.len() + 1;
+                // Use a unique suffix based on method+func names to avoid LLVM SSA conflicts
+                let uid = format!("{}_{}", sanitize_name(method_name), sanitize_name(func_name));
+                out.push_str(&format!(
+                    "  %def_meth_{u} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                    u = uid, l = meth_len, n = meth_const
+                ));
+                out.push_str(&format!(
+                    "  %def_func_{u} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                    u = uid, l = func_len, n = func_const
+                ));
+                out.push_str(&format!(
+                    "  call void @jdruby_def_method(i64 %r{}, i8* %def_meth_{}, i8* %def_func_{})\n",
+                    class_reg, uid, uid
+                ));
+            }
+            MirInst::IncludeModule(class_reg, module_name) => {
+                let mod_const = self.string_pool.get(module_name.as_str()).unwrap();
+                let mod_len = module_name.len() + 1;
+                let uid = sanitize_name(module_name);
+                out.push_str(&format!(
+                    "  %inc_mod_{u} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                    u = uid, l = mod_len, n = mod_const
+                ));
+                out.push_str(&format!(
+                    "  %inc_mod_val_{u} = call i64 @jdruby_const_get(i8* %inc_mod_{u})\n",
+                    u = uid
+                ));
+                // Use jdruby_send to call include
+                let incl_str = self.string_pool.get("include").unwrap().clone();
+                let incl_len = "include".len() + 1;
+                out.push_str(&format!(
+                    "  %inc_name_{u} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                    u = uid, l = incl_len, n = incl_str
+                ));
+                out.push_str(&format!(
+                    "  call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r{}, i8* %inc_name_{}, i32 1, i64 %inc_mod_val_{})\n",
+                    class_reg, uid, uid
                 ));
             }
             MirInst::Nop => {}
