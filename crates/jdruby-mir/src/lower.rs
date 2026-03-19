@@ -237,11 +237,21 @@ impl HirLowering {
                 // Store class as a constant
                 self.emit(MirInst::Store(cls.name.clone(), class_reg));
 
-                // Register each method defined in the class body
+                // Register each method or include in the class body
                 for node in &cls.body {
-                    if let HirNode::FuncDef(def) = node {
-                        let qualified = format!("{}#{}", cls.name, def.name);
-                        self.emit(MirInst::DefMethod(class_reg, def.name.clone(), qualified));
+                    match node {
+                        HirNode::FuncDef(def) => {
+                            let qualified = format!("{}#{}", cls.name, def.name);
+                            self.emit(MirInst::DefMethod(class_reg, def.name.clone(), qualified));
+                        }
+                        HirNode::Call(call) => {
+                            if call.method == "include" {
+                                if let Some(HirNode::VarRef(v)) = call.args.first() {
+                                    self.emit(MirInst::IncludeModule(class_reg, v.name.clone()));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
 

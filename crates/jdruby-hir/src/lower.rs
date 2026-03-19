@@ -136,8 +136,22 @@ impl AstLowering {
             Stmt::Next(_) => Some(HirNode::Next),
             Stmt::Case(s) => Self::lower_case(s),
             Stmt::BeginRescue(_) => Some(HirNode::Nop), // simplified for now
-            Stmt::Alias(_) | Stmt::Require(_) | Stmt::AttrDecl(_) | Stmt::MixinStmt(_) => {
+            Stmt::Alias(_) | Stmt::Require(_) | Stmt::AttrDecl(_) => {
                 Some(HirNode::Nop)
+            }
+            Stmt::MixinStmt(m) => {
+                let method_name = match m.kind {
+                    jdruby_ast::MixinKind::Include => "include",
+                    jdruby_ast::MixinKind::Extend => "extend",
+                    jdruby_ast::MixinKind::Prepend => "prepend",
+                };
+                Some(HirNode::Call(Box::new(HirCall {
+                    receiver: None,
+                    method: method_name.into(),
+                    args: vec![Self::lower_expr(&m.module)],
+                    block: None,
+                    span: m.span,
+                })))
             }
         }
     }

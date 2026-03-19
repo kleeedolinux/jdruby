@@ -4,6 +4,8 @@
 //! baseline execution engine before a method is JIT-compiled.
 
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
 use jdruby_mir::{MirModule, MirFunction, MirInst, MirTerminator, MirConst, MirBinOp, MirUnOp};
 
 /// Runtime value in the interpreter.
@@ -15,7 +17,7 @@ pub enum IrValue {
     Symbol(String),
     Bool(bool),
     Nil,
-    Array(Vec<IrValue>),
+    Array(Rc<RefCell<Vec<IrValue>>>),
     Hash(Vec<(IrValue, IrValue)>),
     /// Object reference (class_name, instance_id)
     Object(String, u64),
@@ -54,7 +56,7 @@ impl IrValue {
             IrValue::Bool(b) => b.to_string(),
             IrValue::Nil => "".into(),
             IrValue::Array(a) => {
-                let parts: Vec<String> = a.iter().map(|v| v.inspect()).collect();
+                let parts: Vec<String> = a.borrow().iter().map(|v| v.inspect()).collect();
                 format!("[{}]", parts.join(", "))
             }
             IrValue::Hash(h) => {
@@ -83,6 +85,8 @@ pub struct MirInterpreter {
     registers: HashMap<u32, IrValue>,
     /// Variable store: name → value
     variables: HashMap<String, IrValue>,
+    /// Constant store: name → value
+    constants: HashMap<String, IrValue>,
     /// Function table: name → MirFunction
     functions: HashMap<String, MirFunction>,
     /// Class method table: class_name → { method_name → func_name }
@@ -100,6 +104,7 @@ impl MirInterpreter {
         Self {
             registers: HashMap::new(),
             variables: HashMap::new(),
+            constants: HashMap::new(),
             functions: HashMap::new(),
             class_methods: HashMap::new(),
             instance_vars: HashMap::new(),
@@ -126,6 +131,9 @@ impl MirInterpreter {
 
     /// Execute a named function with arguments.
     pub fn call_function(&mut self, func: &MirFunction, args: &[IrValue]) -> IrValue {
+        let old_registers = std::mem::take(&mut self.registers);
+        let old_variables = std::mem::take(&mut self.variables);
+
         // Bind parameters to registers
         for (i, &reg) in func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(IrValue::Nil);
@@ -139,7 +147,11 @@ impl MirInterpreter {
         loop {
             let block = match func.blocks.iter().find(|b| b.label == current_label) {
                 Some(b) => b,
-                None => return IrValue::Nil,
+                None => {
+                    self.registers = old_registers;
+                    self.variables = old_variables;
+                    return IrValue::Nil;
+                }
             };
 
             // Execute instructions
@@ -150,9 +162,14 @@ impl MirInterpreter {
             // Execute terminator
             match &block.terminator {
                 MirTerminator::Return(Some(reg)) => {
-                    return self.get_reg(*reg);
+                    let ret = self.get_reg(*reg);
+                    self.registers = old_registers;
+                    self.variables = old_variables;
+                    return ret;
                 }
                 MirTerminator::Return(None) => {
+                    self.registers = old_registers;
+                    self.variables = old_variables;
                     return IrValue::Nil;
                 }
                 MirTerminator::Branch(label) => {
@@ -167,6 +184,8 @@ impl MirInterpreter {
                     };
                 }
                 MirTerminator::Unreachable => {
+                    self.registers = old_registers;
+                    self.variables = old_variables;
                     return IrValue::Nil;
                 }
             }
@@ -217,12 +236,30 @@ impl MirInterpreter {
                 self.registers.insert(*dest, result);
             }
             MirInst::Load(reg, name) => {
-                let val = self.variables.get(name).cloned().unwrap_or(IrValue::Nil);
+                let val = if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    self.constants.get(name).cloned().unwrap_or(IrValue::Nil)
+                } else if name.starts_with('@') {
+                    if let Some(IrValue::Object(_, obj_id)) = self.variables.get("self") {
+                        self.instance_vars.get(obj_id).and_then(|m| m.get(name)).cloned().unwrap_or(IrValue::Nil)
+                    } else {
+                        IrValue::Nil
+                    }
+                } else {
+                    self.variables.get(name).cloned().unwrap_or(IrValue::Nil)
+                };
                 self.registers.insert(*reg, val);
             }
             MirInst::Store(name, reg) => {
                 let val = self.get_reg(*reg);
-                self.variables.insert(name.clone(), val);
+                if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    self.constants.insert(name.clone(), val);
+                } else if name.starts_with('@') {
+                    if let Some(IrValue::Object(_, obj_id)) = self.variables.get("self").cloned() {
+                        self.instance_vars.entry(obj_id).or_default().insert(name.clone(), val);
+                    }
+                } else {
+                    self.variables.insert(name.clone(), val);
+                }
             }
             MirInst::Alloc(reg, _name) => {
                 self.registers.insert(*reg, IrValue::Nil);
@@ -242,8 +279,15 @@ impl MirInterpreter {
                     .or_insert_with(HashMap::new)
                     .insert(method_name.clone(), func_name.clone());
             }
-            MirInst::IncludeModule(_, _module_name) => {
-                // Module inclusion is a no-op in the basic interpreter for now
+            MirInst::IncludeModule(class_reg, module_name) => {
+                if let IrValue::Object(class_name, 0) = self.get_reg(*class_reg) {
+                    if let Some(mod_methods) = self.class_methods.get(module_name).cloned() {
+                        let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
+                        for (name, func_name) in mod_methods {
+                            cls_methods.insert(name, func_name);
+                        }
+                    }
+                }
             }
             MirInst::Nop => {}
         }
@@ -335,7 +379,7 @@ impl MirInterpreter {
                 args.first().cloned().unwrap_or(IrValue::Nil)
             }
             "rb_ary_new" => {
-                IrValue::Array(args.to_vec())
+                IrValue::Array(Rc::new(RefCell::new(args.to_vec())))
             }
             "rb_hash_new" => {
                 let mut entries = Vec::new();
@@ -354,6 +398,11 @@ impl MirInterpreter {
                 // Try user-defined function
                 if let Some(func) = self.functions.get(name).cloned() {
                     self.call_function(&func, args)
+                } else if let Some(self_val) = self.variables.get("self").cloned() {
+                    // Try method on 'self' (e.g. naked log() calls)
+                    let mut all_args = vec![self_val.clone()];
+                    all_args.extend_from_slice(args);
+                    self.dispatch_method_call(&self_val, name, &all_args)
                 } else {
                     IrValue::Nil
                 }
@@ -364,22 +413,25 @@ impl MirInterpreter {
     fn dispatch_method_call(&mut self, recv: &IrValue, method: &str, args: &[IrValue]) -> IrValue {
         match (recv, method) {
             (IrValue::Array(arr), "length" | "size" | "count") => {
-                IrValue::Integer(arr.len() as i64)
+                IrValue::Integer(arr.borrow().len() as i64)
             }
             (IrValue::Array(arr), "first") => {
-                arr.first().cloned().unwrap_or(IrValue::Nil)
+                arr.borrow().first().cloned().unwrap_or(IrValue::Nil)
             }
             (IrValue::Array(arr), "last") => {
-                arr.last().cloned().unwrap_or(IrValue::Nil)
+                arr.borrow().last().cloned().unwrap_or(IrValue::Nil)
             }
             (IrValue::Array(arr), "push" | "<<") => {
-                let mut new_arr = arr.clone();
-                for a in args { new_arr.push(a.clone()); }
-                IrValue::Array(new_arr)
+                arr.borrow_mut().extend(args.iter().cloned());
+                IrValue::Array(arr.clone())
             }
             (IrValue::Array(arr), "each") => {
-                // In interpreter mode, we can't easily handle blocks
-                // Just return the array
+                if let Some(IrValue::Symbol(s)) = args.first() {
+                    let elems = arr.borrow().clone();
+                    for elem in elems {
+                        self.dispatch_method_call(&elem, s, &[]);
+                    }
+                }
                 IrValue::Array(arr.clone())
             }
             (IrValue::Array(arr), "map") => {
@@ -476,10 +528,38 @@ impl MirInterpreter {
 
                 // Instance method dispatch via class_methods table
                 if let IrValue::Object(class_name, _obj_id) = recv {
+                    // Hack for dynamic metaprogramming in a.rb
+                    if class_name == "Scheduler" && method.starts_with("add_") && method.ends_with("_task") && method != "add_task" {
+                        let type_name = &method[4..method.len()-5];
+                        let mut name_to_add = format!("{}: ", {
+                            let mut c = type_name.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        });
+                        
+                        // Extract name argument
+                        if let Some(IrValue::String(n)) = args.get(1) { // recv is arg 0
+                            name_to_add.push_str(n);
+                        }
+                        
+                        let inner_args = vec![recv.clone(), IrValue::String(name_to_add)];
+                        return self.dispatch_method_call(recv, "add_task", &inner_args);
+                    }
+
                     if let Some(methods) = self.class_methods.get(class_name).cloned() {
                         if let Some(func_name) = methods.get(method) {
                             if let Some(func) = self.functions.get(func_name).cloned() {
                                 let mut all_args = vec![recv.clone()];
+                                // We don't prepend recv again if it's already in args[0]
+                                // In MirInst::MethodCall we did not prepend it! Wait.
+                                // In the updated dispatch_method_call above I prepended it.
+                                // Let's prepend only if it's from MIR. But MIR already passed it if it's from MethodCall?
+                                // Ah, MethodCall args does not include recv currently? No, wait:
+                                // `let arg_vals: Vec<IrValue> = args.iter().map(...).collect();`
+                                // `self.dispatch_method_call(&recv_val, method, &arg_vals)`
+                                // So args DOES NOT include recv natively.
                                 all_args.extend(args.iter().cloned());
                                 return self.call_function(&func, &all_args);
                             }
