@@ -130,12 +130,21 @@ impl CodeGenerator {
                         self.intern_string(method);
                     }
                     MirInst::Load(_, name) | MirInst::Store(name, _) => {
-                        let sname = sanitize_name(name);
-                        if self.globals.insert(sname.clone()) {
-                            self.global_decls.push_str(&format!(
-                                "@{} = internal global i64 0, align 8\n", sname
-                            ));
+                        if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('$') {
+                            let sname = sanitize_name(name);
+                            if self.globals.insert(sname.clone()) {
+                                self.global_decls.push_str(&format!(
+                                    "@{} = internal global i64 0, align 8\n", sname
+                                ));
+                            }
+                        } else if name.starts_with('@') {
+                            self.intern_string(name);
                         }
+                    }
+                    MirInst::Call(_, name, _) => {
+                         if !matches!(name.as_str(), "puts" | "print" | "p" | "rb_ary_new_from_values" | "rb_ary_new" | "jdruby_ary_new" | "rb_hash_new" | "rb_yield") {
+                             self.intern_string(name);
+                         }
                     }
                     MirInst::ClassNew(_, name, superclass) => {
                         self.intern_string(name);
@@ -246,6 +255,8 @@ impl CodeGenerator {
         out.push_str("declare void @jdruby_def_method(i64, i8*, i8*) ; class, name, func_ptr\n");
         out.push_str("declare i64 @jdruby_const_get(i8*)             ; get constant by name\n");
         out.push_str("declare void @jdruby_const_set(i8*, i64)       ; set constant\n");
+        out.push_str("declare i64 @jdruby_ivar_get(i64, i8*)           ; get instance variable\n");
+        out.push_str("declare void @jdruby_ivar_set(i64, i8*, i64)     ; set instance variable\n");
         out.push_str("\n");
     }
 
@@ -259,8 +270,32 @@ impl CodeGenerator {
             sanitize_name(&func.name), params.join(", ")
         ));
 
-        for (i, block) in func.blocks.iter().enumerate() {
-            self.emit_block(block, out, i == 0);
+        // Create allocas for all local variables
+        let mut locals = std::collections::HashSet::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::Store(name, _) | MirInst::Load(_, name) = inst {
+                    if !name.starts_with(|c: char| c.is_ascii_uppercase()) && !name.starts_with('@') && !name.starts_with('$') {
+                        locals.insert(name.clone());
+                    }
+                }
+            }
+        }
+        
+        out.push_str("entry_allocas:\n");
+        for local in locals {
+            out.push_str(&format!("  %local_{} = alloca i64, align 8\n", sanitize_name(&local)));
+        }
+        // Jump to the actual first block
+        if let Some(first_block) = func.blocks.first() {
+            out.push_str(&format!("  br label %{}\n\n", first_block.label));
+        } else {
+            out.push_str("  ret i64 0\n}\n\n");
+            return;
+        }
+
+        for block in &func.blocks {
+            self.emit_block(block, out, false);
         }
 
         out.push_str("}\n\n");
@@ -521,18 +556,26 @@ impl CodeGenerator {
                             out.push_str(&format!("  %r{} = load i64, i64* @JDRUBY_NIL, align 8\n", dest));
                         }
                     }
-                    _ => {
-                        // User-defined function call
-                        let arg_list: Vec<String> = args.iter()
-                            .map(|r| format!("i64 %r{}", r))
-                            .collect();
-                        let sname = sanitize_name(name);
-
-                        // Try direct call first (for known functions)
+                    "rb_ary_new" | "jdruby_ary_new" => {
+                        let arg_list: Vec<String> = args.iter().map(|r| format!("i64 %r{}", r)).collect();
+                        let argc = args.len() as i32;
                         out.push_str(&format!(
-                            "  %r{} = call i64 @{}({})\n",
-                            dest, sname, arg_list.join(", ")
+                            "  %r{} = call i64 (i32, ...) @jdruby_ary_new(i32 {}{}{})\n",
+                            dest, argc, if argc > 0 { ", " } else { "" }, arg_list.join(", ")
                         ));
+                    }
+                    _ => {
+                        // User-defined function call -> implicit self dynamic dispatch!
+                        let method_str = self.string_pool.get(name.as_str()).unwrap();
+                        let mlen = name.len() + 1;
+                        out.push_str(&format!("  %self_for_call_{dest} = load i64, i64* %local_self, align 8\n", dest=dest));
+                        out.push_str(&format!("  %meth_ptr_{d} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n", d=dest, l=mlen, n=method_str));
+                        let argc = args.len() as i32;
+                        let mut arg_str = format!("i64 %self_for_call_{}, i8* %meth_ptr_{}, i32 {}", dest, dest, argc);
+                        for arg_reg in args {
+                            arg_str.push_str(&format!(", i64 %r{}", arg_reg));
+                        }
+                        out.push_str(&format!("  %r{} = call i64 (i64, i8*, i32, ...) @jdruby_send({})\n", dest, arg_str));
                     }
                 }
             }
@@ -576,16 +619,30 @@ impl CodeGenerator {
                 ));
             }
             MirInst::Load(reg, name) => {
-                out.push_str(&format!(
-                    "  %r{} = load i64, i64* @{}, align 8\n",
-                    reg, sanitize_name(name)
-                ));
+                if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('$') {
+                    out.push_str(&format!("  %r{} = load i64, i64* @{}, align 8\n", reg, sanitize_name(name)));
+                } else if name.starts_with('@') {
+                    let ivar_str = self.string_pool.get(name.as_str()).unwrap();
+                    let ilen = name.len() + 1;
+                    out.push_str(&format!("  %self_for_{reg} = load i64, i64* %local_self, align 8\n", reg=reg));
+                    out.push_str(&format!("  %ivar_str_{reg} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n", reg=reg, l=ilen, n=ivar_str));
+                    out.push_str(&format!("  %r{} = call i64 @jdruby_ivar_get(i64 %self_for_{}, i8* %ivar_str_{})\n", reg, reg, reg));
+                } else {
+                    out.push_str(&format!("  %r{} = load i64, i64* %local_{}, align 8\n", reg, sanitize_name(name)));
+                }
             }
             MirInst::Store(name, reg) => {
-                out.push_str(&format!(
-                    "  store i64 %r{}, i64* @{}, align 8\n",
-                    reg, sanitize_name(name)
-                ));
+                if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('$') {
+                    out.push_str(&format!("  store i64 %r{}, i64* @{}, align 8\n", reg, sanitize_name(name)));
+                } else if name.starts_with('@') {
+                    let ivar_str = self.string_pool.get(name.as_str()).unwrap();
+                    let ilen = name.len() + 1;
+                    out.push_str(&format!("  %self_for_{reg} = load i64, i64* %local_self, align 8\n", reg=reg));
+                    out.push_str(&format!("  %ivar_str_{reg} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n", reg=reg, l=ilen, n=ivar_str));
+                    out.push_str(&format!("  call void @jdruby_ivar_set(i64 %self_for_{}, i8* %ivar_str_{}, i64 %r{})\n", reg, reg, reg));
+                } else {
+                    out.push_str(&format!("  store i64 %r{}, i64* %local_{}, align 8\n", reg, sanitize_name(name)));
+                }
             }
             MirInst::Alloc(reg, name) => {
                 out.push_str(&format!(
@@ -598,32 +655,32 @@ impl CodeGenerator {
             MirInst::ClassNew(dest, name, superclass) => {
                 let name_const = self.string_pool.get(name.as_str()).unwrap();
                 let name_len = name.len() + 1;
+
                 out.push_str(&format!(
-                    "  %cls_name_{d} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
-                    d = dest, l = name_len, n = name_const
+                    "  %cls_name_{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",
+                    dest, name_len, name_len, name_const
                 ));
-                let super_val = if let Some(sc) = superclass {
+
+                if let Some(sc) = superclass {
                     let sc_const = self.string_pool.get(sc.as_str()).unwrap();
                     let sc_len = sc.len() + 1;
                     out.push_str(&format!(
-                        "  %cls_super_{d} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
-                        d = dest, l = sc_len, n = sc_const
+                        "  %sc_name_{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",
+                        dest, sc_len, sc_len, sc_const
                     ));
-                    out.push_str(&format!(
-                        "  %cls_super_val_{d} = call i64 @jdruby_const_get(i8* %cls_super_{d})\n",
-                        d = dest
-                    ));
-                    format!("%cls_super_val_{}", dest)
+                    out.push_str(&format!("  %sc_val_{} = call i64 @jdruby_const_get(i8* %sc_name_{})\n", dest, dest));
                 } else {
-                    let nil_reg = format!("cls_nil_{}", dest);
-                    out.push_str(&format!(
-                        "  %{} = load i64, i64* @JDRUBY_NIL, align 8\n", nil_reg
-                    ));
-                    format!("%{}", nil_reg)
-                };
+                    out.push_str(&format!("  %sc_val_{} = load i64, i64* @JDRUBY_NIL, align 8\n", dest));
+                }
+
                 out.push_str(&format!(
-                    "  %r{} = call i64 @jdruby_class_new(i8* %cls_name_{}, i64 {})\n",
-                    dest, dest, super_val
+                    "  %r{} = call i64 @jdruby_class_new(i8* %cls_name_{}, i64 %sc_val_{})\n",
+                    dest, dest, dest
+                ));
+                // Add store instruction to initialize the class constant explicitly!
+                out.push_str(&format!(
+                    "  store i64 %r{}, i64* @{}, align 8\n",
+                    dest, sanitize_name(name)
                 ));
             }
             MirInst::DefMethod(class_reg, method_name, func_name) => {

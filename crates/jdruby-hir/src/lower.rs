@@ -408,10 +408,11 @@ impl AstLowering {
 
         let mut result = parts.remove(0);
         for part in parts {
-            result = HirNode::BinOp(Box::new(HirBinOp {
-                left: result,
-                op: HirOp::Add, // String concatenation
-                right: part,
+            result = HirNode::Call(Box::new(HirCall {
+                receiver: Some(result),
+                method: "+".into(),
+                args: vec![part],
+                block: None,
                 span: s.span,
             }));
         }

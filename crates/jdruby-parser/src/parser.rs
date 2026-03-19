@@ -593,7 +593,16 @@ impl Parser {
                 let val: f64 = lex.replace('_', "").parse().unwrap_or(0.0);
                 Some(Expr::FloatLit(FloatLit { value: val, span }))
             }
-            TokenKind::StringDouble | TokenKind::StringSingle => {
+            TokenKind::StringDouble => {
+                let lex = self.lexeme();
+                self.advance();
+                let val = unescape_string(&lex);
+                if val.contains("#{") {
+                    return Some(self.parse_interpolated_string_fallback(&val, span));
+                }
+                Some(Expr::StringLit(StringLit { value: val, span }))
+            }
+            TokenKind::StringSingle => {
                 let lex = self.lexeme();
                 self.advance();
                 let val = unescape_string(&lex);
@@ -646,6 +655,47 @@ impl Parser {
                 None
             }
         }
+    }
+
+    fn parse_interpolated_string_fallback(&mut self, s: &str, span: SourceSpan) -> Expr {
+        let mut parts = Vec::new();
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        let mut buf = String::new();
+        while i < chars.len() {
+            if chars[i] == '#' && i + 1 < chars.len() && chars[i+1] == '{' {
+                if !buf.is_empty() {
+                    parts.push(jdruby_ast::StringPart::Literal(buf.clone()));
+                    buf.clear();
+                }
+                i += 2;
+                let mut depth = 1;
+                let mut expr_str = String::new();
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' { depth += 1; }
+                    else if chars[i] == '}' { depth -= 1; }
+                    
+                    if depth > 0 {
+                        expr_str.push(chars[i]);
+                    }
+                    i += 1;
+                }
+                
+                let mut inner_lexer = jdruby_lexer::Lexer::new(&expr_str);
+                let (tokens, _) = inner_lexer.tokenize();
+                let mut inner_parser = crate::Parser::new(tokens);
+                if let Some(expr) = inner_parser.parse_expr() {
+                    parts.push(jdruby_ast::StringPart::Interpolation(Box::new(expr)));
+                }
+            } else {
+                buf.push(chars[i]);
+                i += 1;
+            }
+        }
+        if !buf.is_empty() {
+            parts.push(jdruby_ast::StringPart::Literal(buf));
+        }
+        Expr::InterpolatedString(jdruby_ast::InterpolatedString { parts, span })
     }
 
     fn parse_identifier_expr(&mut self) -> Option<Expr> {

@@ -59,8 +59,13 @@ declare i64 @jdruby_class_new(i8*, i64)       ; name, superclass
 declare void @jdruby_def_method(i64, i8*, i8*) ; class, name, func_ptr
 declare i64 @jdruby_const_get(i8*)             ; get constant by name
 declare void @jdruby_const_set(i8*, i64)       ; set constant
+declare i64 @jdruby_ivar_get(i64, i8*)           ; get instance variable
+declare void @jdruby_ivar_set(i64, i8*, i64)     ; set instance variable
 
 define i64 @main() {
+entry_allocas:
+  br label %entry_0
+
 entry_0:
   %str_ptr_0 = getelementptr inbounds [14 x i8], [14 x i8]* @.str.0, i64 0, i64 0
   %r0 = call i64 @jdruby_str_new(i8* %str_ptr_0, i64 13)

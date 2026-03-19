@@ -190,6 +190,11 @@ impl MirOptimizer {
         for block in &mut func.blocks {
             block.instructions.retain(|inst| {
                 if let MirInst::Store(name, _) = inst {
+                    // Only eliminate dead stores for purely local variables.
+                    // Constants (A-Z), instance vars (@), and globals ($) cross block/function boundaries!
+                    if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('@') || name.starts_with('$') {
+                        return true;
+                    }
                     loaded.contains(name)
                 } else {
                     true
