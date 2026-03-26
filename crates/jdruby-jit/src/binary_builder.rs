@@ -156,13 +156,6 @@ impl<'ctx> BinaryBuilder<'ctx> {
 
     /// Link the object file with the JDRuby runtime.
     fn link_runtime(&self, obj_path: &Path) -> Result<(), String> {
-        // In a real implementation, this would:
-        // 1. Link with jdruby-runtime static library
-        // 2. Link with jdruby-ffi static library
-        // 3. Link with jdgc static library
-        // 4. Link with system libraries (libc, libm, etc.)
-        
-        // For now, this is a placeholder that would use the system's linker
         let output = std::process::Command::new("cc")
             .arg(obj_path)
             .arg("-o")
@@ -189,12 +182,15 @@ impl<'ctx> BinaryBuilder<'ctx> {
             args.push("-static".to_string());
         }
 
-        // Add runtime library paths
-        // In real implementation, these would be the built static libraries
+        // Add library search paths for target directory
+        // Static libraries are built by cargo as lib<crate>.a files
+        args.push("-L".to_string());
+        args.push("target/debug".to_string());
         args.push("-L".to_string());
         args.push("target/release".to_string());
-        
-        // Link against runtime libraries
+
+        // Link against JDRuby runtime libraries
+        // These are built as static libraries from the Rust crates
         args.push("-ljdruby_runtime".to_string());
         args.push("-ljdruby_ffi".to_string());
         args.push("-ljdgc".to_string());

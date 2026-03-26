@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 description = "Ruby runtime for JDRuby — object model, GC, green threads"
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [dependencies]
 jdruby-common.workspace = true
 jdgc = { path = "../jdgc" }

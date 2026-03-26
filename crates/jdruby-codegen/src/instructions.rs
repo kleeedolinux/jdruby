@@ -417,22 +417,33 @@ fn emit_call(dest: u32, name: &str, args: &[u32], ctx: &CodegenContext, out: &mu
             ));
         }
         _ => {
-            let method_str = ctx.get_string_constant(name);
-            if method_str.is_some() {
+            // For non-built-in functions, properly check if method string is interned
+            if let Some(method_str) = ctx.get_string_constant(name) {
+                let mlen = name.len() + 1;
                 out.push_str(&format!(
                     "  %self_for_call_{} = load i64, i64* %local_self, align 8\n",
                     dest
                 ));
+                out.push_str(&format!(
+                    "  %meth_ptr_{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",
+                    dest, mlen, mlen, method_str
+                ));
+                let argc = args.len() as i32;
+                let mut arg_str = format!("i64 %self_for_call_{}, i8* %meth_ptr_{}, i32 {}", dest, dest, argc);
+                for arg in args {
+                    arg_str.push_str(&format!(", i64 %r{}", arg));
+                }
+                out.push_str(&format!(
+                    "  %r{} = call i64 (i64, i8*, i32, ...) @jdruby_send({})\n",
+                    dest, arg_str
+                ));
+            } else {
+                // Method name not interned - return nil as fallback
+                out.push_str(&format!(
+                    "  %r{} = load i64, i64* @JDRUBY_NIL, align 8\n",
+                    dest
+                ));
             }
-            let argc = args.len() as i32;
-            let mut arg_str = format!("i64 %self_for_call_{}, i8* %meth_ptr_{}, i32 {}", dest, dest, argc);
-            for arg in args {
-                arg_str.push_str(&format!(", i64 %r{}", arg));
-            }
-            out.push_str(&format!(
-                "  %r{} = call i64 (i64, i8*, i32, ...) @jdruby_send({})\n",
-                dest, arg_str
-            ));
         }
     }
 }
@@ -445,23 +456,30 @@ fn emit_method_call(
     ctx: &CodegenContext,
     out: &mut String,
 ) {
+    // Only emit the method call if the method name string was interned
     if let Some(method_str) = ctx.get_string_constant(method) {
         let mlen = method.len() + 1;
         out.push_str(&format!(
             "  %meth_ptr_{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",
             dest, mlen, mlen, method_str
         ));
-    }
 
-    let argc = args.len() as i32;
-    let mut arg_str = format!("i64 %r{}, i8* %meth_ptr_{}, i32 {}", recv, dest, argc);
-    for arg in args {
-        arg_str.push_str(&format!(", i64 %r{}", arg));
+        let argc = args.len() as i32;
+        let mut arg_str = format!("i64 %r{}, i8* %meth_ptr_{}, i32 {}", recv, dest, argc);
+        for arg in args {
+            arg_str.push_str(&format!(", i64 %r{}", arg));
+        }
+        out.push_str(&format!(
+            "  %r{} = call i64 (i64, i8*, i32, ...) @jdruby_send({})\n",
+            dest, arg_str
+        ));
+    } else {
+        // Method name not interned - return nil as fallback
+        out.push_str(&format!(
+            "  %r{} = load i64, i64* @JDRUBY_NIL, align 8\n",
+            dest
+        ));
     }
-    out.push_str(&format!(
-        "  %r{} = call i64 (i64, i8*, i32, ...) @jdruby_send({})\n",
-        dest, arg_str
-    ));
 }
 
 fn emit_load(reg: u32, name: &str, ctx: &CodegenContext, out: &mut String) {
@@ -616,7 +634,9 @@ fn emit_include_module(
     ) {
         let mod_len = module_name.len() + 1;
         let incl_len = "include".len() + 1;
-        let uid = sanitize_name(module_name);
+        // Include class_reg in the unique ID to avoid duplicate variable names
+        // when the same module is included by multiple classes
+        let uid = format!("{}_cr{}", sanitize_name(module_name), class_reg);
 
         out.push_str(&format!(
             "  %inc_mod_{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",

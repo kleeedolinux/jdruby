@@ -5,7 +5,7 @@ edition.workspace = true
 description = "C-API compatibility layer (ruby.h shim) for JDRuby — enables native C-extension loading"
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 jdruby-common.workspace = true

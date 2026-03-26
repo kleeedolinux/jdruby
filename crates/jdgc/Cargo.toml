@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Julia's Dream Garbage Collector -  Concurrent GC for JDRuby"
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [dependencies]
 libc = "0.2"
 bitflags = "2.4"
