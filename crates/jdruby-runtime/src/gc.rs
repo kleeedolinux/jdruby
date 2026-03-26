@@ -680,10 +680,6 @@ impl JDGC {
 
     /// Find a region with enough space, or allocate a new one.
     pub fn allocate_object(&mut self, payload_size: usize) -> *mut ObjectHeader {
-        let total = align_up(
-            std::mem::size_of::<ObjectHeader>() + payload_size,
-            OBJ_ALIGN,
-        );
         // Try existing regions.
         for region in &self.regions {
             if let Some(obj) = region.allocate_object(payload_size) {
@@ -811,7 +807,6 @@ impl JDGC {
             return old_obj; // Cannot evacuate pinned objects.
         }
 
-        let payload_size = old_hdr.payload_size;
         let total_size = old_hdr.total_size();
 
         // ── Allocate in target region ──────────────────────
@@ -1228,7 +1223,7 @@ mod tests {
 
         let root = gc.allocate_object(64);
         let child = gc.allocate_object(128);
-        let garbage = gc.allocate_object(256); // not referenced by root
+        let _garbage = gc.allocate_object(256); // not referenced by root
 
         // Wire root → child
         unsafe {

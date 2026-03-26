@@ -9,8 +9,6 @@ pub struct SemanticAnalyzer {
     diagnostics: Vec<Diagnostic>,
     /// Class hierarchy: class_name → superclass_name
     class_hierarchy: std::collections::HashMap<String, Option<String>>,
-    /// Module definitions: module_name → list of method names
-    module_methods: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl SemanticAnalyzer {
@@ -19,7 +17,6 @@ impl SemanticAnalyzer {
             scopes: ScopeStack::new(),
             diagnostics: Vec::new(),
             class_hierarchy: std::collections::HashMap::new(),
-            module_methods: std::collections::HashMap::new(),
         };
         sa.define_builtins();
         sa

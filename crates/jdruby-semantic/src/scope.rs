@@ -174,6 +174,7 @@ impl ScopeStack {
     }
 
     /// Get the enclosing class name, if any.
+    #[allow(dead_code)]
     pub fn enclosing_class(&self) -> Option<&str> {
         for scope in self.scopes.iter().rev() {
             if scope.kind == ScopeKind::Class {
@@ -184,6 +185,7 @@ impl ScopeStack {
     }
 
     /// Get the enclosing method name, if any.
+    #[allow(dead_code)]
     pub fn enclosing_method(&self) -> Option<&str> {
         for scope in self.scopes.iter().rev() {
             if scope.kind == ScopeKind::Method {
@@ -194,6 +196,7 @@ impl ScopeStack {
     }
 
     /// Get the depth of the scope stack.
+    #[allow(dead_code)]
     pub fn depth(&self) -> usize {
         self.scopes.len()
     }

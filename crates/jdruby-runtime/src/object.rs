@@ -5,7 +5,7 @@
 
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::mem::ManuallyDrop;
-use jdruby_common::ffi_types::{VALUE, ID, RBasic, rb_special_const_p};
+use jdruby_common::ffi_types::{VALUE, RBasic, rb_special_const_p};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // RObject — Generic Ruby Object
