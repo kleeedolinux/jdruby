@@ -26,6 +26,37 @@ pub union ProcBody {
     pub native: *mut u8,
 }
 
+/// Discriminant for ProcBody union
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcBodyDiscriminant {
+    Iseq = 0,
+    Native = 1,
+}
+
+impl ProcBody {
+    /// Get the discriminant type for this union
+    pub fn discriminant(&self) -> ProcBodyDiscriminant {
+        // Default to Iseq if pointer is null, otherwise determine by context
+        // In practice, the RubyProc struct would store the discriminant
+        // For now, we use a heuristic based on pointer alignment
+        unsafe {
+            if self.iseq.is_null() {
+                ProcBodyDiscriminant::Iseq
+            } else {
+                // Check if pointer looks like a function pointer vs bytecode
+                // Function pointers are typically word-aligned but not necessarily 16-byte aligned
+                let ptr_val = self.native as usize;
+                if ptr_val & 0x1 == 0 {
+                    ProcBodyDiscriminant::Native
+                } else {
+                    ProcBodyDiscriminant::Iseq
+                }
+            }
+        }
+    }
+}
+
 /// Ruby Binding - captures local variable scope
 #[repr(C)]
 pub struct RubyBinding {
@@ -108,14 +139,32 @@ impl RubyProc {
         if self.is_lambda && self.arity >= 0 {
             // Lambda checks argument count
             if args.len() != self.arity as usize {
-                panic!("wrong number of arguments");
+                panic!("wrong number of arguments (given {}, expected {})", args.len(), self.arity);
             }
         }
         
-        // Placeholder - would execute block body
-        // In real implementation, this would interpret bytecode
-        // or call native function
-        0 // Return nil placeholder
+        // Execute the proc body
+        match self.body.discriminant() {
+            ProcBodyDiscriminant::Native => {
+                // Call native function pointer
+                let func: fn(&[u64]) -> u64 = unsafe { 
+                    std::mem::transmute(self.body.native) 
+                };
+                func(args)
+            }
+            ProcBodyDiscriminant::Iseq => {
+                // Bytecode interpretation would happen here
+                // For AOT/JIT compiler, this would typically not be used
+                // as bytecode gets compiled to native code
+                let iseq_ptr = unsafe { self.body.iseq };
+                if iseq_ptr.is_null() {
+                    panic!("attempt to call nil proc body");
+                }
+                // Placeholder: In a full implementation, this would dispatch to an interpreter
+                // or trigger JIT compilation of the bytecode
+                0 // Return nil as placeholder for unimplemented bytecode execution
+            }
+        }
     }
 }
 

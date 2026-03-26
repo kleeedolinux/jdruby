@@ -145,20 +145,35 @@ pub fn jdruby_to_value(rv: &jdruby_runtime::value::RubyValue) -> VALUE {
         RV::Nil => RUBY_QNIL,
         RV::Symbol(id) => rb_id2sym(*id as usize),
         RV::String(rs) => {
-            let _data = rs.data.as_bytes();
-            let layout = Layout::from_size_align(
-                std::mem::size_of::<ObjectHeader>() + std::mem::size_of::<crate::value::RString>(),
-                8
-            ).unwrap();
+            let data = rs.data.as_bytes();
+            let len = data.len();
+            // Allocate: ObjectHeader + RString (with embedded capacity) + string data
+            let total_size = std::mem::size_of::<ObjectHeader>() 
+                + std::mem::size_of::<crate::value::RString>() 
+                + len;
+            let layout = Layout::from_size_align(total_size, 8).unwrap();
             
             with_registry_write(|registry| {
                 let ptr = registry.allocate::<crate::value::RString>(layout)?;
                 let value = registry.alloc_value();
                 
-                // Initialize RString (simplified - would need proper init)
+                // Get pointers to header and data area
+                let header_ptr = ptr.as_ptr() as *mut ObjectHeader;
                 let rstring_ptr = unsafe { 
-                    ptr.as_ptr().add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RString 
+                    (header_ptr as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RString 
                 };
+                let data_ptr = unsafe {
+                    (rstring_ptr as *mut u8).add(std::mem::size_of::<crate::value::RString>())
+                };
+                
+                // Initialize RString fields
+                unsafe {
+                    (*rstring_ptr).len = len as isize;
+                    (*rstring_ptr).capa = len as isize;
+                    (*rstring_ptr).ptr = data_ptr as *mut u8;
+                    // Copy string data
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, len);
+                }
                 
                 // Pin for FFI safety
                 ptr.header().pin();
@@ -170,28 +185,42 @@ pub fn jdruby_to_value(rv: &jdruby_runtime::value::RubyValue) -> VALUE {
                 Some(value)
             }).unwrap_or(RUBY_QNIL)
         }
-        RV::Array(_elements) => {
-            let _values: Vec<VALUE> = _elements.iter().map(|e| jdruby_to_value(e)).collect();
+        RV::Array(elements) => {
+            let values: Vec<VALUE> = elements.iter().map(|e| jdruby_to_value(e)).collect();
+            let len = values.len();
             
             with_registry_write(|registry| {
-                // Allocate space for RArray header + elements
-                let layout = Layout::from_size_align(
-                    std::mem::size_of::<ObjectHeader>() + std::mem::size_of::<crate::value::RArray>(),
-                    8
-                ).unwrap();
+                // Allocate: ObjectHeader + RArray + element data
+                let total_size = std::mem::size_of::<ObjectHeader>() 
+                    + std::mem::size_of::<crate::value::RArray>() 
+                    + (len * std::mem::size_of::<VALUE>());
+                let layout = Layout::from_size_align(total_size, 8).unwrap();
                 
                 let ptr = registry.allocate::<crate::value::RArray>(layout)?;
                 let value = registry.alloc_value();
                 
-                // Initialize RArray (simplified)
+                // Get pointers to header and data area
+                let header_ptr = ptr.as_ptr() as *mut ObjectHeader;
                 let rarray_ptr = unsafe { 
-                    ptr.as_ptr().add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RArray 
+                    (header_ptr as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RArray 
                 };
+                let data_ptr = unsafe {
+                    (rarray_ptr as *mut u8).add(std::mem::size_of::<crate::value::RArray>()) as *mut VALUE
+                };
+                
+                // Initialize RArray fields
+                unsafe {
+                    (*rarray_ptr).len = len as isize;
+                    (*rarray_ptr).capa = len as isize;
+                    (*rarray_ptr).ptr = data_ptr;
+                    // Copy element data
+                    std::ptr::copy_nonoverlapping(values.as_ptr(), data_ptr, len);
+                }
                 
                 // Pin for FFI safety
                 ptr.header().pin();
                 
-                // Store element count in a side table (would need proper implementation)
+                // Register
                 let mut arrays = registry.arrays.write().unwrap();
                 arrays.insert(value, GcPtr::from_raw(rarray_ptr).unwrap());
                 
@@ -265,22 +294,39 @@ pub fn value_to_jdruby(v: VALUE) -> jdruby_runtime::value::RubyValue {
         return RV::Symbol(rb_sym2id(v) as u64);
     }
 
-    // Heap object — look up in global registry
+    // Heap object — look up in global registry and decode properly
     with_registry_read(|registry| {
         // Check strings first
         {
             let strings = registry.strings.read().unwrap();
-            if strings.contains_key(&v) {
-                // For now return a placeholder - full RString decoding would be complex
-                return Some(RV::String(RubyString::new("[string]".to_string())));
+            if let Some(ptr) = strings.get(&v) {
+                unsafe {
+                    let rstring = &*ptr.as_ptr();
+                    let len = rstring.len as usize;
+                    let data_ptr = rstring.ptr;
+                    let bytes = std::slice::from_raw_parts(data_ptr, len);
+                    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                        return Some(RV::String(RubyString::new(s)));
+                    }
+                }
             }
         }
         
         // Check arrays
         {
             let arrays = registry.arrays.read().unwrap();
-            if arrays.contains_key(&v) {
-                return Some(RV::Array(vec![])); // Placeholder
+            if let Some(ptr) = arrays.get(&v) {
+                unsafe {
+                    let rarray = &*ptr.as_ptr();
+                    let len = rarray.len as usize;
+                    let data_ptr = rarray.ptr;
+                    let elements = std::slice::from_raw_parts(data_ptr, len);
+                    let converted: Vec<jdruby_runtime::value::RubyValue> = elements
+                        .iter()
+                        .map(|&val| value_to_jdruby(val))
+                        .collect();
+                    return Some(RV::Array(converted));
+                }
             }
         }
         
@@ -310,9 +356,15 @@ pub fn value_to_jdruby(v: VALUE) -> jdruby_runtime::value::RubyValue {
 pub fn value_to_str(v: VALUE) -> Option<String> {
     with_registry_read(|registry| {
         let strings = registry.strings.read().unwrap();
-        if strings.contains_key(&v) {
-            // Simplified - would need proper RString decoding
-            Some("[string]".to_string())
+        if let Some(ptr) = strings.get(&v) {
+            // Read RString fields and extract data
+            unsafe {
+                let rstring = &*ptr.as_ptr();
+                let len = rstring.len as usize;
+                let data_ptr = rstring.ptr;
+                let bytes = std::slice::from_raw_parts(data_ptr, len);
+                String::from_utf8(bytes.to_vec()).ok()
+            }
         } else {
             None
         }
@@ -323,8 +375,11 @@ pub fn value_to_str(v: VALUE) -> Option<String> {
 pub fn value_ary_len(v: VALUE) -> Option<usize> {
     with_registry_read(|registry| {
         let arrays = registry.arrays.read().unwrap();
-        if arrays.contains_key(&v) {
-            Some(0) // Placeholder - would need proper RArray length access
+        if let Some(ptr) = arrays.get(&v) {
+            unsafe {
+                let rarray = &*ptr.as_ptr();
+                Some(rarray.len as usize)
+            }
         } else {
             None
         }
@@ -332,11 +387,19 @@ pub fn value_ary_len(v: VALUE) -> Option<usize> {
 }
 
 /// Get array element at index.
-pub fn value_ary_entry(v: VALUE, _idx: usize) -> Option<VALUE> {
+pub fn value_ary_entry(v: VALUE, idx: usize) -> Option<VALUE> {
     with_registry_read(|registry| {
         let arrays = registry.arrays.read().unwrap();
-        if arrays.contains_key(&v) {
-            None // Placeholder - would need proper RArray access
+        if let Some(ptr) = arrays.get(&v) {
+            unsafe {
+                let rarray = &*ptr.as_ptr();
+                if idx < rarray.len as usize {
+                    let data_ptr = rarray.ptr;
+                    Some(*data_ptr.add(idx))
+                } else {
+                    None
+                }
+            }
         } else {
             None
         }
@@ -344,23 +407,37 @@ pub fn value_ary_entry(v: VALUE, _idx: usize) -> Option<VALUE> {
 }
 
 /// Create a new string VALUE from a Rust string.
-pub fn str_to_value(_s: &str) -> VALUE {
-    let layout = Layout::from_size_align(
-        std::mem::size_of::<ObjectHeader>() + std::mem::size_of::<crate::value::RString>(),
-        8
-    ).unwrap();
+pub fn str_to_value(s: &str) -> VALUE {
+    let data = s.as_bytes();
+    let len = data.len();
+    let total_size = std::mem::size_of::<ObjectHeader>() 
+        + std::mem::size_of::<crate::value::RString>() 
+        + len;
+    let layout = Layout::from_size_align(total_size, 8).unwrap();
     
     with_registry_write(|registry| {
         let ptr = registry.allocate::<crate::value::RString>(layout)?;
         let value = registry.alloc_value();
         
+        // Get pointers
+        let header_ptr = ptr.as_ptr() as *mut ObjectHeader;
+        let rstring_ptr = unsafe { 
+            (header_ptr as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RString 
+        };
+        let data_ptr = unsafe {
+            (rstring_ptr as *mut u8).add(std::mem::size_of::<crate::value::RString>())
+        };
+        
+        // Initialize RString fields
+        unsafe {
+            (*rstring_ptr).len = len as isize;
+            (*rstring_ptr).capa = len as isize;
+            (*rstring_ptr).ptr = data_ptr as *mut u8;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, len);
+        }
+        
         // Pin for FFI safety
         ptr.header().pin();
-        
-        // Initialize RString (simplified)
-        let rstring_ptr = unsafe { 
-            ptr.as_ptr().add(std::mem::size_of::<ObjectHeader>()) as *mut crate::value::RString 
-        };
         
         let mut strings = registry.strings.write().unwrap();
         strings.insert(value, GcPtr::from_raw(rstring_ptr).unwrap());

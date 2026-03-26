@@ -72,18 +72,20 @@ impl<'ctx> BinaryBuilder<'ctx> {
         };
 
         let mut codegen = CodeGenerator::new(codegen_config);
-        let _ir_text = codegen
+        let ir_text = codegen
             .generate(mir)
             .map_err(|e| format!("Code generation failed: {:?}", e))?;
 
-        // Parse the IR text into an inkwell module
+        // Parse the IR text into an inkwell module using MemoryBuffer
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
+            ir_text.as_bytes(),
+            name,
+        );
+        
         let module = self
             .context
-            .create_module(name);
-
-        // For now, we'd need to write IR to file and parse it
-        // This is a placeholder for the actual implementation
-        // In real implementation, use LLVM's IR parser
+            .create_module_from_ir(buffer)
+            .map_err(|e| format!("Failed to parse IR: {}", e.to_string()))?;
 
         module
             .verify()

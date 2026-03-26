@@ -128,19 +128,105 @@ impl RubyTime {
     }
 
     /// Format using strftime-style format string
+    /// Supports: %Y (year), %m (month 01-12), %d (day 01-31), %H (hour 00-23), %M (minute 00-59), %S (second 00-59),
+    /// %N (nanoseconds), %z (timezone offset), %Z (timezone name), %A (weekday name), %B (month name)
     pub fn strftime(&self, fmt: &str) -> String {
-        // Simplified implementation - just return ISO format
-        if fmt == "%Y-%m-%d %H:%M:%S" {
-            format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
-                1970 + self.sec / 31_536_000, // approximate year
-                1, 1, // month/day placeholder
-                (self.sec % 86400) / 3600,
-                (self.sec % 3600) / 60,
-                self.sec % 60
-            )
-        } else {
-            format!("{}.{:09}", self.sec, self.nsec)
+        let secs_since_epoch = self.sec;
+        
+        // Calculate date components (simplified - doesn't handle leap years, month lengths correctly)
+        // Using standard Unix epoch calculations
+        let days_since_epoch = (secs_since_epoch / 86400) as i64;
+        let seconds_of_day = (secs_since_epoch % 86400) as u64;
+        
+        let hour = (seconds_of_day / 3600) as u32;
+        let minute = ((seconds_of_day % 3600) / 60) as u32;
+        let second = (seconds_of_day % 60) as u32;
+        
+        // Zeller's congruence-based weekday calculation (0 = Sunday)
+        // Using a simplified algorithm
+        let weekday = ((days_since_epoch + 4) % 7) as usize; // Jan 1, 1970 was Thursday (4)
+        const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const WEEKDAYS_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        
+        // Approximate year/month/day calculation (simplified)
+        let year = 1970 + (days_since_epoch / 365) as i32;
+        let day_of_year = (days_since_epoch % 365) as u32;
+        
+        // Month calculation (simplified, not accounting for leap years)
+        const MONTH_DAYS: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        let mut month = 1u32;
+        for (i, &days) in MONTH_DAYS.iter().enumerate().skip(1) {
+            if day_of_year < days {
+                month = i as u32;
+                break;
+            }
+            month = (i + 1) as u32;
         }
+        let day = if month > 1 {
+            day_of_year - MONTH_DAYS[month as usize - 1] + 1
+        } else {
+            day_of_year + 1
+        };
+        
+        const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June",
+                                     "July", "August", "September", "October", "November", "December"];
+        const MONTHS_ABBR: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        
+        // Format parsing
+        let mut result = String::with_capacity(fmt.len() * 2);
+        let mut chars = fmt.chars();
+        
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                match chars.next() {
+                    Some('Y') => result.push_str(&format!("{:04}", year)),
+                    Some('y') => result.push_str(&format!("{:02}", year % 100)),
+                    Some('m') => result.push_str(&format!("{:02}", month)),
+                    Some('d') => result.push_str(&format!("{:02}", day)),
+                    Some('e') => result.push_str(&format!("{:2}", day)), // space-padded
+                    Some('H') => result.push_str(&format!("{:02}", hour)),
+                    Some('k') => result.push_str(&format!("{:2}", hour)), // space-padded
+                    Some('M') => result.push_str(&format!("{:02}", minute)),
+                    Some('S') => result.push_str(&format!("{:02}", second)),
+                    Some('N') => result.push_str(&format!("{:09}", self.nsec)),
+                    Some('L') => result.push_str(&format!("{:03}", self.nsec / 1_000_000)), // milliseconds
+                    Some('z') => {
+                        let offset = self.utc_offset;
+                        let sign = if offset >= 0 { '+' } else { '-' };
+                        let abs_offset = offset.abs();
+                        let offset_hours = abs_offset / 3600;
+                        let offset_mins = (abs_offset % 3600) / 60;
+                        result.push_str(&format!("{}{:02}{:02}", sign, offset_hours, offset_mins));
+                    }
+                    Some('Z') => {
+                        if self.is_utc() {
+                            result.push_str("UTC");
+                        } else {
+                            result.push_str(&format!("UTC{:+03}", self.utc_offset / 3600));
+                        }
+                    }
+                    Some('A') => result.push_str(WEEKDAYS[weekday]),
+                    Some('a') => result.push_str(WEEKDAYS_ABBR[weekday]),
+                    Some('B') => result.push_str(MONTHS[(month - 1) as usize]),
+                    Some('b') | Some('h') => result.push_str(MONTHS_ABBR[(month - 1) as usize]),
+                    Some('j') => result.push_str(&format!("{:03}", day_of_year + 1)), // day of year
+                    Some('u') => result.push_str(&format!("{}", if weekday == 0 { 7 } else { weekday })), // weekday 1-7 (Monday=1)
+                    Some('w') => result.push_str(&format!("{}", weekday)), // weekday 0-6 (Sunday=0)
+                    Some('s') => result.push_str(&format!("{}", self.sec)), // seconds since epoch
+                    Some('%') => result.push('%'),
+                    Some(other) => {
+                        result.push('%');
+                        result.push(other);
+                    }
+                    None => result.push('%'),
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        
+        result
     }
 
     /// Compare two times
