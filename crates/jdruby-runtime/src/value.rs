@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// A Ruby value — tagged union for runtime representation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RubyValue {
     /// 63-bit integer (tagged pointer optimization)
     Integer(i64),
@@ -111,7 +111,7 @@ impl RubyValue {
 }
 
 /// A heap-allocated Ruby string.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RubyString {
     pub data: String,
     pub frozen: bool,
@@ -137,7 +137,7 @@ impl RubyString {
 }
 
 /// A heap-allocated Ruby hash.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RubyHash {
     pub entries: Vec<(RubyValue, RubyValue)>,
     pub default: Option<Box<RubyValue>>,
@@ -152,14 +152,14 @@ impl RubyHash {
 }
 
 /// A Ruby proc/lambda.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RubyProc {
     pub is_lambda: bool,
     pub arity: i32,
 }
 
 /// A heap-allocated Ruby object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RubyObject {
     pub class_name: String,
     pub class_id: u64,
