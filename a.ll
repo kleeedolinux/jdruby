@@ -2,7 +2,6 @@
 source_filename = "main"
 target triple = "x86_64-unknown-linux-gnu"
 
-; ── String Constants ──
 @.str.0 = private unnamed_addr constant [7 x i8] c"Logger\00", align 1
 @.str.1 = private unnamed_addr constant [4 x i8] c"log\00", align 1
 @.str.2 = private unnamed_addr constant [11 x i8] c"Logger#log\00", align 1
@@ -48,71 +47,66 @@ target triple = "x86_64-unknown-linux-gnu"
 @.str.42 = private unnamed_addr constant [5 x i8] c"add_\00", align 1
 @.str.43 = private unnamed_addr constant [14 x i8] c"define_method\00", align 1
 
-; ── Global Variables ──
 @Logger = internal global i64 0, align 8
 @Task = internal global i64 0, align 8
 @Scheduler = internal global i64 0, align 8
 @Time = internal global i64 0, align 8
 
-; ── Runtime Declarations ──
-;
-; Value representation: all Ruby values are i64 (tagged pointers).
-; Integers use tagged fixnum encoding (value << 1 | 1).
-; Objects are heap pointers (always even, tag bit = 0).
-;
+@JDRUBY_NIL = external global i64
+@JDRUBY_TRUE = external global i64
+@JDRUBY_FALSE = external global i64
+@Qnil = external global i64
+@Qtrue = external global i64
+@Qfalse = external global i64
 
-; Value constructors
-declare i64 @jdruby_int_new(i64)              ; create tagged integer
-declare i64 @jdruby_float_new(double)          ; box a float
-declare i64 @jdruby_str_new(i8*, i64)          ; create string from ptr+len
-declare i64 @jdruby_sym_intern(i8*)            ; intern a symbol
-declare i64 @jdruby_ary_new(i32, ...)          ; create array (argc, elems...)
-declare i64 @jdruby_hash_new(i32, ...)         ; create hash (npairs, k, v...)
-declare i64 @jdruby_bool(i1)                   ; box boolean
-
-; Well-known constants
-@JDRUBY_NIL   = external global i64              ; nil value
-@JDRUBY_TRUE  = external global i64              ; true value
-@JDRUBY_FALSE = external global i64              ; false value
-
-; Method dispatch
-declare i64 @jdruby_send(i64, i8*, i32, ...)   ; receiver, method_name, argc, args...
-declare i64 @jdruby_call(i8*, i32, ...)        ; func_name, argc, args...
-declare i64 @jdruby_yield(i32, ...)            ; argc, args...
-declare i64 @jdruby_block_given()              ; check if block given
-
-; I/O builtins
-declare void @jdruby_puts(i64)                 ; puts(value)
-declare void @jdruby_print(i64)                ; print(value)
-declare i64  @jdruby_p(i64)                    ; p(value) → value
-declare void @jdruby_raise(i8*, ...)           ; raise exception
-
-; Arithmetic intrinsics (fast path for tagged integers)
+declare i64 @jdruby_int_new(i64)
+declare i64 @jdruby_float_new(double)
+declare i64 @jdruby_str_new(i8*, i64)
+declare i64 @jdruby_sym_intern(i8*)
+declare i64 @jdruby_ary_new(i32, ...)
+declare i64 @jdruby_hash_new(i32, ...)
+declare i64 @jdruby_bool(i1)
+declare i64 @jdruby_send(i64, i8*, i32, ...)
+declare i64 @jdruby_call(i8*, i32, ...)
+declare i64 @jdruby_yield(i32, ...)
+declare i1 @jdruby_block_given()
+declare void @jdruby_puts(i64)
+declare void @jdruby_print(i64)
+declare i64 @jdruby_p(i64)
+declare void @jdruby_raise(i8*, ...)
 declare i64 @jdruby_int_add(i64, i64)
 declare i64 @jdruby_int_sub(i64, i64)
 declare i64 @jdruby_int_mul(i64, i64)
 declare i64 @jdruby_int_div(i64, i64)
 declare i64 @jdruby_int_mod(i64, i64)
 declare i64 @jdruby_int_pow(i64, i64)
-
-; Comparison
-declare i1  @jdruby_eq(i64, i64)
-declare i1  @jdruby_lt(i64, i64)
-declare i1  @jdruby_gt(i64, i64)
-declare i1  @jdruby_le(i64, i64)
-declare i1  @jdruby_ge(i64, i64)
-declare i1  @jdruby_truthy(i64)                ; test Ruby truthiness
-
-; Class/module support
-declare i64 @jdruby_class_new(i8*, i64)       ; name, superclass
-declare void @jdruby_def_method(i64, i8*, i8*) ; class, name, func_ptr
-declare i64 @jdruby_const_get(i8*)             ; get constant by name
-declare void @jdruby_const_set(i8*, i64)       ; set constant
-declare i64 @jdruby_ivar_get(i64, i8*)           ; get instance variable
-declare void @jdruby_ivar_set(i64, i8*, i64)     ; set instance variable
-
+declare i1 @jdruby_eq(i64, i64)
+declare i1 @jdruby_lt(i64, i64)
+declare i1 @jdruby_gt(i64, i64)
+declare i1 @jdruby_le(i64, i64)
+declare i1 @jdruby_ge(i64, i64)
+declare i1 @jdruby_truthy(i64)
+declare i64 @jdruby_class_new(i8*, i64)
+declare void @jdruby_def_method(i64, i8*, i8*)
+declare i64 @jdruby_const_get(i8*)
+declare void @jdruby_const_set(i8*, i64)
+declare i64 @jdruby_ivar_get(i64, i8*)
+declare void @jdruby_ivar_set(i64, i8*, i64)
+declare i64 @rb_int_new(i64)
+declare i64 @rb_str_new(i8*, i64)
+declare i64 @rb_ary_new()
+declare i64 @rb_hash_new()
+declare i64 @rb_intern(i8*)
+declare i64 @rb_funcallv(i64, i64, i32, i64*)
+declare i64 @rb_define_class(i8*, i64)
+declare void @rb_define_method(i64, i8*, i64, i32)
+declare i64 @rb_iv_get(i64, i8*)
+declare i64 @rb_iv_set(i64, i8*, i64)
+declare i64 @rb_const_get(i64, i64)
+declare void @rb_const_set(i64, i64, i64)
+declare void @rb_gc_mark(i64)
 define i64 @main() {
-entry_allocas:
+entry:
   %local_scheduler = alloca i64, align 8
   br label %entry_0
 
@@ -160,15 +154,18 @@ entry_0:
   call void @jdruby_def_method(i64 %r2, i8* %def_meth_create_task_type_Scheduler__create_task_type, i8* %def_func_create_task_type_Scheduler__create_task_type)
   %sym_ptr_3 = getelementptr inbounds [6 x i8], [6 x i8]* @.str.17, i64 0, i64 0
   %r3 = call i64 @jdruby_sym_intern(i8* %sym_ptr_3)
-  %r5 = load i64, i64* @Scheduler, align 8
+  %const_ptr_5 = getelementptr inbounds [10 x i8], [10 x i8]* @.str.9, i64 0, i64 0
+  %r5 = call i64 @jdruby_const_get(i8* %const_ptr_5)
   %meth_ptr_4 = getelementptr inbounds [17 x i8], [17 x i8]* @.str.15, i64 0, i64 0
   %r4 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r5, i8* %meth_ptr_4, i32 1, i64 %r3)
   %sym_ptr_6 = getelementptr inbounds [7 x i8], [7 x i8]* @.str.18, i64 0, i64 0
   %r6 = call i64 @jdruby_sym_intern(i8* %sym_ptr_6)
-  %r8 = load i64, i64* @Scheduler, align 8
+  %const_ptr_8 = getelementptr inbounds [10 x i8], [10 x i8]* @.str.9, i64 0, i64 0
+  %r8 = call i64 @jdruby_const_get(i8* %const_ptr_8)
   %meth_ptr_7 = getelementptr inbounds [17 x i8], [17 x i8]* @.str.15, i64 0, i64 0
   %r7 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r8, i8* %meth_ptr_7, i32 1, i64 %r6)
-  %r10 = load i64, i64* @Scheduler, align 8
+  %const_ptr_10 = getelementptr inbounds [10 x i8], [10 x i8]* @.str.9, i64 0, i64 0
+  %r10 = call i64 @jdruby_const_get(i8* %const_ptr_10)
   %meth_ptr_9 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.19, i64 0, i64 0
   %r9 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r10, i8* %meth_ptr_9, i32 0)
   store i64 %r9, i64* %local_scheduler, align 8
@@ -194,8 +191,10 @@ entry_0:
 }
 
 define i64 @Logger__log(i64 %r0, i64 %r1) {
-entry_allocas:
+entry:
   %local_message = alloca i64, align 8
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -205,7 +204,6 @@ entry_0:
   %r2 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r3, i8* %meth_ptr_2, i32 0)
   %str_ptr_5 = getelementptr inbounds [3 x i8], [3 x i8]* @.str.26, i64 0, i64 0
   %r5 = call i64 @jdruby_str_new(i8* %str_ptr_5, i64 2)
-  %r9 = load i64, i64* @Time, align 8
   %meth_ptr_8 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.27, i64 0, i64 0
   %r8 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r9, i8* %meth_ptr_8, i32 0)
   %meth_ptr_7 = getelementptr inbounds [5 x i8], [5 x i8]* @.str.25, i64 0, i64 0
@@ -224,9 +222,11 @@ entry_0:
 }
 
 define i64 @Task__initialize(i64 %r0, i64 %r1, i64 %r2) {
-entry_allocas:
-  %local_block = alloca i64, align 8
+entry:
   %local_name = alloca i64, align 8
+  %local_block = alloca i64, align 8
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -244,7 +244,9 @@ entry_0:
 }
 
 define i64 @Task__run(i64 %r0) {
-entry_allocas:
+entry:
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -258,7 +260,6 @@ entry_0:
   %meth_ptr_3 = getelementptr inbounds [2 x i8], [2 x i8]* @.str.29, i64 0, i64 0
   %r3 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r4, i8* %meth_ptr_3, i32 1, i64 %r1)
   %self_for_call_5 = load i64, i64* %local_self, align 8
-  %meth_ptr_5 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %r5 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_5, i8* %meth_ptr_5, i32 1, i64 %r3)
   %self_for_6 = load i64, i64* %local_self, align 8
   %ivar_str_6 = getelementptr inbounds [8 x i8], [8 x i8]* @.str.31, i64 0, i64 0
@@ -285,13 +286,14 @@ merge_2:
   %meth_ptr_14 = getelementptr inbounds [2 x i8], [2 x i8]* @.str.29, i64 0, i64 0
   %r14 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r15, i8* %meth_ptr_14, i32 1, i64 %r12)
   %self_for_call_16 = load i64, i64* %local_self, align 8
-  %meth_ptr_16 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %r16 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_16, i8* %meth_ptr_16, i32 1, i64 %r14)
   ret i64 %r16
 }
 
 define i64 @Scheduler__initialize(i64 %r0) {
-entry_allocas:
+entry:
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -303,10 +305,12 @@ entry_0:
 }
 
 define i64 @Scheduler__add_task(i64 %r0, i64 %r1, i64 %r2) {
-entry_allocas:
-  %local_name = alloca i64, align 8
+entry:
+  %local_self = alloca i64, align 8
   %local_task = alloca i64, align 8
+  %local_name = alloca i64, align 8
   %local_block = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -314,7 +318,8 @@ entry_0:
   store i64 %r2, i64* %local_block, align 8
   %r3 = load i64, i64* %local_name, align 8
   %r4 = load i64, i64* %local_block, align 8
-  %r6 = load i64, i64* @Task, align 8
+  %const_ptr_6 = getelementptr inbounds [5 x i8], [5 x i8]* @.str.3, i64 0, i64 0
+  %r6 = call i64 @jdruby_const_get(i8* %const_ptr_6)
   %meth_ptr_5 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.19, i64 0, i64 0
   %r5 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r6, i8* %meth_ptr_5, i32 2, i64 %r3, i64 %r4)
   store i64 %r5, i64* %local_task, align 8
@@ -332,20 +337,20 @@ entry_0:
   %meth_ptr_12 = getelementptr inbounds [2 x i8], [2 x i8]* @.str.29, i64 0, i64 0
   %r12 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r13, i8* %meth_ptr_12, i32 1, i64 %r10)
   %self_for_call_14 = load i64, i64* %local_self, align 8
-  %meth_ptr_14 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %r14 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_14, i8* %meth_ptr_14, i32 1, i64 %r12)
   ret i64 %r14
 }
 
 define i64 @Scheduler__run_all(i64 %r0) {
-entry_allocas:
+entry:
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
   %str_ptr_1 = getelementptr inbounds [21 x i8], [21 x i8]* @.str.38, i64 0, i64 0
   %r1 = call i64 @jdruby_str_new(i8* %str_ptr_1, i64 20)
   %self_for_call_2 = load i64, i64* %local_self, align 8
-  %meth_ptr_2 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %r2 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_2, i8* %meth_ptr_2, i32 1, i64 %r1)
   %sym_ptr_3 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.7, i64 0, i64 0
   %r3 = call i64 @jdruby_sym_intern(i8* %sym_ptr_3)
@@ -357,14 +362,15 @@ entry_0:
   %str_ptr_6 = getelementptr inbounds [21 x i8], [21 x i8]* @.str.40, i64 0, i64 0
   %r6 = call i64 @jdruby_str_new(i8* %str_ptr_6, i64 20)
   %self_for_call_7 = load i64, i64* %local_self, align 8
-  %meth_ptr_7 = getelementptr inbounds [4 x i8], [4 x i8]* @.str.1, i64 0, i64 0
   %r7 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_7, i8* %meth_ptr_7, i32 1, i64 %r6)
   ret i64 %r7
 }
 
 define i64 @Scheduler__create_task_type(i64 %r0, i64 %r1) {
-entry_allocas:
+entry:
   %local_type_name = alloca i64, align 8
+  %local_self = alloca i64, align 8
+  store i64 %r0, i64* %local_self, align 8
   br label %entry_0
 
 entry_0:
@@ -381,7 +387,6 @@ entry_0:
   %meth_ptr_3 = getelementptr inbounds [2 x i8], [2 x i8]* @.str.29, i64 0, i64 0
   %r3 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %r6, i8* %meth_ptr_3, i32 1, i64 %r2)
   %self_for_call_8 = load i64, i64* %local_self, align 8
-  %meth_ptr_8 = getelementptr inbounds [14 x i8], [14 x i8]* @.str.43, i64 0, i64 0
   %r8 = call i64 (i64, i8*, i32, ...) @jdruby_send(i64 %self_for_call_8, i8* %meth_ptr_8, i32 1, i64 %r3)
   ret i64 %r8
 }

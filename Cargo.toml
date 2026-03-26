@@ -14,6 +14,7 @@ members = [
     "crates/jdruby-jit",
     "crates/jdruby-ffi",
     "crates/jdruby-builder",
+    "crates/jdgc",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ jdruby-runtime = { path = "crates/jdruby-runtime" }
 jdruby-jit = { path = "crates/jdruby-jit" }
 jdruby-ffi = { path = "crates/jdruby-ffi" }
 jdruby-builder = { path = "crates/jdruby-builder" }
+jdgc = { path = "crates/jdgc" }
 
 # External dependencies
 clap = { version = "4", features = ["derive"] }

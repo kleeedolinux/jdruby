@@ -8,3 +8,6 @@ description = "JIT compiler for JDRuby — compiles MIR to native code at runtim
 jdruby-common.workspace = true
 jdruby-mir.workspace = true
 jdruby-codegen.workspace = true
+jdruby-ffi.workspace = true
+jdruby-runtime.workspace = true
+inkwell.workspace = true
