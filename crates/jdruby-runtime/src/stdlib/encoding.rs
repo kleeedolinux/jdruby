@@ -90,45 +90,6 @@ impl Default for EncodingTable {
     }
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct RubyTime {
-    pub sec: i64,
-    pub nsec: u32,
-    pub utc_offset: i32,
-    pub flags: u32,
-}
-
-impl RubyTime {
-    /// Create a new RubyTime instance
-    pub fn at(sec: f64) -> Self {
-        let sec_int = sec as i64;
-        let nsec = (sec.fract() * 1_000_000_000.0) as u32;
-        
-        Self {
-            sec: sec_int,
-            nsec,
-            utc_offset: 0,
-            flags: 0,
-        }
-    }
-    
-    /// Add duration to time
-    pub fn add(&self, dur: Duration) -> Self {
-        let dur_nanos = dur.as_nanos();
-        let total_nanos = (self.nsec as u128) + dur_nanos;
-        let add_sec = (total_nanos / 1_000_000_000) as i64;
-        let new_nsec = (total_nanos % 1_000_000_000) as u32;
-        
-        Self {
-            sec: self.sec + add_sec,
-            nsec: new_nsec,
-            utc_offset: self.utc_offset,
-            flags: self.flags,
-        }
-    }
-}
-
 impl RubyEncoding {
     /// UTF-8 encoding
     pub fn utf8() -> Self {
@@ -197,13 +158,6 @@ pub fn utf8_char_len(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_time_at() {
-        let t = RubyTime::at(1234567890.5);
-        assert_eq!(t.sec, 1234567890);
-        assert!(t.nsec >= 500_000_000); // Use >= for floating point precision
-    }
 
     #[test]
     fn test_encoding_utf8() {

@@ -162,7 +162,7 @@ impl RubyArray {
             if self.is_embedded() {
                 unsafe { self.storage.embed[i - 1] = v; }
             } else {
-                unsafe { *self.storage.heap.ptr.add(i - 1) = v; }
+                unsafe { (*self.storage.heap).ptr.add(i - 1).write(v) };
             }
         }
         self.len -= 1;
@@ -185,13 +185,13 @@ impl RubyArray {
             if self.is_embedded() {
                 unsafe { self.storage.embed[i + 1] = v; }
             } else {
-                unsafe { *self.storage.heap.ptr.add(i + 1) = v; }
+                unsafe { (*self.storage.heap).ptr.add(i + 1).write(v) };
             }
         }
         if self.is_embedded() {
             unsafe { self.storage.embed[0] = val; }
         } else {
-            unsafe { *self.storage.heap.ptr = val; }
+            unsafe { (*self.storage.heap).ptr.write(val) };
         }
         self.len += 1;
     }

@@ -108,7 +108,7 @@ impl RubyTime {
         let new_nsec = (total_nanos % 1_000_000_000) as u32;
         
         Self {
-            sec: self.sec + dur.as_secs() as i64 + add_sec,
+            sec: self.sec + add_sec,
             nsec: new_nsec,
             utc_offset: self.utc_offset,
             flags: self.flags,
@@ -185,7 +185,7 @@ mod tests {
     fn test_time_at() {
         let t = RubyTime::at(1234567890.5);
         assert_eq!(t.sec, 1234567890);
-        assert!(t.nsec > 500_000_000);
+        assert!(t.nsec >= 500_000_000); // Use >= for floating point precision
     }
 
     #[test]
