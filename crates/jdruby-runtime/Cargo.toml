@@ -6,4 +6,6 @@ description = "Ruby runtime for JDRuby — object model, GC, green threads"
 
 [dependencies]
 jdruby-common.workspace = true
+jdgc = { path = "../jdgc" }
 bitflags = "2.4"
+libc = "0.2"

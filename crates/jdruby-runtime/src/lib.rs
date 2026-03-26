@@ -14,7 +14,6 @@
 //! - **`thread`**: Green thread scheduler (M:N model).
 
 pub mod object;
-pub mod gc;
 pub mod thread;
 pub mod value;
 pub mod class;

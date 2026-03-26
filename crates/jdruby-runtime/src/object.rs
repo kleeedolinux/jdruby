@@ -237,12 +237,12 @@ pub unsafe fn rb_obj_set_flags(obj: VALUE, flags: VALUE) {
 
 pub struct FfiRef<T> {
     ptr: *mut T,
-    gc_header: *mut crate::gc::ObjectHeader,
+    gc_header: *mut jdgc::ObjectHeader,
 }
 
 impl<T> FfiRef<T> {
     pub unsafe fn new(ptr: *mut T) -> Self {
-        let header = crate::gc::ObjectHeader::from_object_ptr(ptr);
+        let header = jdgc::ObjectHeader::from_ptr(ptr as *mut u8);
         (*header).pin();
         Self { ptr, gc_header: header }
     }
