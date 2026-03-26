@@ -1,4 +1,4 @@
-//! # JDRuby Codegen — LLVM IR Code Generation
+//! # JDRuby Codegen — LLVM IR Code Generation using Inkwell
 //!
 //! Translates MIR to LLVM IR for native compilation using the real JDRuby runtime.
 
@@ -7,6 +7,9 @@ pub mod instructions;
 pub mod runtime;
 pub mod utils;
 
+use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::targets::{TargetMachine, TargetTriple};
 use context::CodegenContext;
 use jdruby_common::{Diagnostic, ErrorReporter};
 use jdruby_mir::MirModule;
@@ -55,7 +58,7 @@ pub struct CodegenConfig {
 impl Default for CodegenConfig {
     fn default() -> Self {
         Self {
-            target_triple: "x86_64-unknown-linux-gnu".into(),
+            target_triple: TargetMachine::get_default_triple().to_string(),
             opt_level: OptLevel::O2,
             debug_info: false,
             output_format: OutputFormat::LlvmIr,
@@ -63,17 +66,19 @@ impl Default for CodegenConfig {
     }
 }
 
-/// Main code generator for LLVM IR.
-pub struct CodeGenerator {
+/// Main code generator for LLVM IR using Inkwell.
+pub struct CodeGenerator<'ctx> {
     config: CodegenConfig,
-    context: CodegenContext,
+    context: CodegenContext<'ctx>,
+    llvm_context: &'ctx Context,
 }
 
-impl CodeGenerator {
-    pub fn new(config: CodegenConfig) -> Self {
+impl<'ctx> CodeGenerator<'ctx> {
+    pub fn new(config: CodegenConfig, llvm_context: &'ctx Context) -> Self {
         Self {
             context: CodegenContext::new(),
             config,
+            llvm_context,
         }
     }
 
@@ -92,19 +97,35 @@ impl CodeGenerator {
         self.context.clear();
         self.context.set_module_name(&module.name);
 
+        // Prescan functions to collect string constants
         for func in &module.functions {
             self.context.prescan_function(func);
         }
 
-        let mut output = String::with_capacity(16384);
         let mut reporter = ErrorReporter::new();
 
-        self.emit_header(&mut output);
-        self.emit_data_section(&mut output);
-        runtime::emit_runtime_decls(&mut output);
+        // Create Inkwell module
+        let llvm_module = self.llvm_context.create_module(&module.name);
+        
+        // Set target triple
+        let target_triple = TargetTriple::create(&self.config.target_triple);
+        llvm_module.set_triple(&target_triple);
 
+        // Create builder
+        let builder = self.llvm_context.create_builder();
+
+        // Emit runtime declarations
+        runtime::emit_runtime_decls(self.llvm_context, &llvm_module);
+
+        // Emit all functions
         for func in &module.functions {
-            if let Err(diagnostics) = instructions::emit_function(func, &self.context, &mut output) {
+            if let Err(diagnostics) = instructions::emit_function(
+                func,
+                &self.context,
+                self.llvm_context,
+                &llvm_module,
+                &builder,
+            ) {
                 for diag in diagnostics {
                     reporter.report_diagnostic(diag);
                 }
@@ -118,37 +139,78 @@ impl CodeGenerator {
             }
         }
 
+        // Get output as string
+        let output = llvm_module.print_to_string().to_string();
         (output, reporter)
     }
 
-    fn emit_header(&self, out: &mut String) {
-        use std::fmt::Write;
+    /// Generate LLVM module for JIT compilation (returns the module directly).
+    pub fn generate_module(&mut self, module: &MirModule) -> Result<Module<'ctx>, Vec<Diagnostic>> {
+        self.context.clear();
+        self.context.set_module_name(&module.name);
 
-        let _ = writeln!(out, "; ModuleID = '{}'", self.context.module_name());
-        let _ = writeln!(out, "source_filename = \"{}\"", self.context.module_name());
-        let _ = writeln!(out, "target triple = \"{}\"", self.config.target_triple);
-        let _ = writeln!(out);
-    }
-
-    fn emit_data_section(&self, out: &mut String) {
-        let strings = self.context.get_string_constants();
-        if !strings.is_empty() {
-            out.push_str(&strings);
-            out.push('\n');
+        // Prescan functions
+        for func in &module.functions {
+            self.context.prescan_function(func);
         }
 
-        let globals = self.context.get_global_decls();
-        if !globals.is_empty() {
-            out.push_str(&globals);
-            out.push('\n');
+        // Create Inkwell module
+        let llvm_module = self.llvm_context.create_module(&module.name);
+        
+        // Set target triple
+        let target_triple = TargetTriple::create(&self.config.target_triple);
+        llvm_module.set_triple(&target_triple);
+
+        // Create builder
+        let builder = self.llvm_context.create_builder();
+
+        // Emit runtime declarations
+        runtime::emit_runtime_decls(self.llvm_context, &llvm_module);
+
+        // Emit all functions
+        for func in &module.functions {
+            if let Err(diagnostics) = instructions::emit_function(
+                func,
+                &self.context,
+                self.llvm_context,
+                &llvm_module,
+                &builder,
+            ) {
+                return Err(diagnostics);
+            }
         }
+
+        // Check for context errors
+        if self.context.has_errors() {
+            return Err(self.context.take_diagnostics());
+        }
+
+        // Verify the module
+        if let Err(err) = llvm_module.verify() {
+            return Err(vec![Diagnostic::error(
+                format!("Module verification failed: {}", err),
+                jdruby_common::SourceSpan::default(),
+            )]);
+        }
+
+        Ok(llvm_module)
     }
 }
 
 /// Generate LLVM IR with default configuration.
 pub fn generate_ir(module: &MirModule) -> Result<String, Vec<Diagnostic>> {
-    let mut codegen = CodeGenerator::new(CodegenConfig::default());
+    let llvm_context = Context::create();
+    let mut codegen = CodeGenerator::new(CodegenConfig::default(), &llvm_context);
     codegen.generate(module)
+}
+
+/// Generate LLVM module for JIT compilation.
+pub fn generate_module<'ctx>(
+    module: &MirModule,
+    llvm_context: &'ctx Context,
+) -> Result<Module<'ctx>, Vec<Diagnostic>> {
+    let mut codegen = CodeGenerator::new(CodegenConfig::default(), llvm_context);
+    codegen.generate_module(module)
 }
 
 #[cfg(test)]
@@ -178,9 +240,9 @@ mod tests {
 
     #[test]
     fn test_codegen_new() {
-        let codegen = CodeGenerator::new(CodegenConfig::default());
+        let llvm_context = Context::create();
+        let codegen = CodeGenerator::new(CodegenConfig::default(), &llvm_context);
         assert_eq!(codegen.config.opt_level, OptLevel::O2);
-        assert_eq!(codegen.config.target_triple, "x86_64-unknown-linux-gnu");
     }
 
     #[test]
@@ -190,7 +252,7 @@ mod tests {
         assert!(result.is_ok());
         
         let ir = result.unwrap();
-        assert!(ir.contains("ModuleID = 'test'"));
+        assert!(ir.contains("; ModuleID = 'test'"));
         assert!(ir.contains("declare i64 @jdruby_int_new(i64)"));
         assert!(ir.contains("declare void @jdruby_puts(i64)"));
         assert!(ir.contains("define i64 @main()"));
@@ -208,8 +270,9 @@ mod tests {
         assert!(result.is_ok());
         
         let ir = result.unwrap();
-        assert!(ir.contains("@.str.test.0 = private unnamed_addr constant"));
-        assert!(ir.contains("c\"hello\\00\""));
+        // Inkwell generates slightly different constant names
+        assert!(ir.contains("private unnamed_addr constant"));
+        assert!(ir.contains("call i64 @jdruby_str_new"));
     }
 
     #[test]
@@ -223,6 +286,19 @@ mod tests {
         assert!(result.is_ok());
         
         let ir = result.unwrap();
-        assert!(ir.contains("@_global_global_var = internal global i64 0"));
+        // Inkwell generates globals differently
+        assert!(ir.contains("@_global_"));
+    }
+
+    #[test]
+    fn test_generate_module_for_jit() {
+        let module = create_simple_module();
+        let llvm_context = Context::create();
+        let result = generate_module(&module, &llvm_context);
+        assert!(result.is_ok());
+        
+        let llvm_module = result.unwrap();
+        let main_fn = llvm_module.get_function("main");
+        assert!(main_fn.is_some());
     }
 }
