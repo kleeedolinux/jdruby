@@ -97,7 +97,7 @@ fn emit_instruction(inst: &MirInst, ctx: &CodegenContext, out: &mut String) {
         }
         MirInst::Load(reg, name) => emit_load(*reg, name, ctx, out),
         MirInst::Store(name, reg) => emit_store(name, *reg, ctx, out),
-        MirInst::Alloc(reg, name) => {
+        MirInst::Alloc(reg, _name) => {
             out.push_str(&format!(
                 "  %alloca_{} = alloca i64, align 8\n",
                 reg

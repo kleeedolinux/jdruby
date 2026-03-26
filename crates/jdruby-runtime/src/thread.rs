@@ -434,9 +434,9 @@ impl Drop for IoPoller {
 /// Worker thread in the native thread pool.
 pub struct WorkerThread {
     _id: usize,
-    local_queue: Mutex<LocalQueue>,
+    _local_queue: Mutex<LocalQueue>,
     handle: Option<std::thread::JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
+    _shutdown: Arc<AtomicBool>,
 }
 
 /// The thread scheduler (M:N model).

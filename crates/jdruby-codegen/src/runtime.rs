@@ -3,7 +3,7 @@
 //! This module defines the LLVM IR declarations that correspond to
 //! the actual C-ABI functions exported by jdruby-ffi and jdruby-runtime.
 
-use jdruby_ffi::value::{RUBY_QNIL, RUBY_QTRUE, RUBY_QFALSE};
+// use jdruby_ffi::value::{RUBY_QNIL, RUBY_QTRUE, RUBY_QFALSE};
 
 /// Runtime function signature for LLVM IR declaration.
 pub struct RuntimeFn {
@@ -98,7 +98,10 @@ pub fn emit_runtime_decls(out: &mut String) {
     out.push('\n');
     
     for func in RUNTIME_FNS {
-        let params = func.params.join(", ");
+        let params = match func.params {
+            &["i64", "i64"] => "i64, i64",
+            _ => &func.params.join(", "),
+        };
         let variadic = if func.variadic { ", ..." } else { "" };
         out.push_str(&format!(
             "declare {} @{}({}{})\n",
