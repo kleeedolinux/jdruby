@@ -206,7 +206,7 @@ pub fn value_to_jdruby(v: VALUE) -> jdruby_runtime::value::RubyValue {
             return RV::Array(elements);
         }
         if let Some(obj) = arena.objects.get(&v) {
-            let type_tag = rb_builtin_type(obj.header.flags);
+            let type_tag = rb_type(obj.header.flags);
             if type_tag == RubyType::Float as u32 {
                 // Recover float bits from class_name
                 if let Some(bits_str) = obj.class_name.strip_prefix("Float:") {

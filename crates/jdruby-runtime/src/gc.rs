@@ -151,6 +151,32 @@ impl ObjectHeader {
         }
     }
 
+    /// Clear the pinned flag (CAS loop).
+    pub fn unpin(&self) {
+        loop {
+            let old = self.load();
+            let new = old & !PINNED_BIT;
+            if old == new {
+                return;
+            }
+            if self
+                .bits
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    /// Get pointer to ObjectHeader from an object pointer (header is immediately before object).
+    /// 
+    /// Safety: obj_ptr must be a valid heap object allocated by JDGC.
+    pub unsafe fn from_object_ptr<T>(obj_ptr: *mut T) -> *mut ObjectHeader {
+        let header_size = std::mem::size_of::<ObjectHeader>();
+        (obj_ptr as *mut u8).sub(header_size) as *mut ObjectHeader
+    }
+
     // ── Color Transitions (CAS) ────────────────────────────
 
     /// Attempt to transition this object from `expected_color` to

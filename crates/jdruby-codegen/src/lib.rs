@@ -282,10 +282,24 @@ impl CodeGenerator {
             }
         }
         
+        // For instance methods (have params including self), ensure local_self exists
+        // and self is added to locals if not already present
+        let has_self_param = !func.params.is_empty();
+        if has_self_param {
+            locals.insert("self".to_string());
+        }
+        
         out.push_str("entry_allocas:\n");
         for local in locals {
             out.push_str(&format!("  %local_{} = alloca i64, align 8\n", sanitize_name(&local)));
         }
+        
+        // Store first param (self) into local_self for instance methods
+        if has_self_param {
+            let self_reg = func.params[0];
+            out.push_str(&format!("  store i64 %r{}, i64* %local_self, align 8\n", self_reg));
+        }
+        
         // Jump to the actual first block
         if let Some(first_block) = func.blocks.first() {
             out.push_str(&format!("  br label %{}\n\n", first_block.label));
@@ -620,7 +634,22 @@ impl CodeGenerator {
             }
             MirInst::Load(reg, name) => {
                 if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('$') {
-                    out.push_str(&format!("  %r{} = load i64, i64* @{}, align 8\n", reg, sanitize_name(name)));
+                    // For constants, use jdruby_const_get to fetch from runtime
+                    // rather than loading from an uninitialized global
+                    let (name_const, name_len) = if let Some(const_name) = self.string_pool.get(name.as_str()) {
+                        (const_name.clone(), name.len() + 1)
+                    } else {
+                        // If not in pool, we need to emit it directly - use the raw name
+                        (format!("\\00{}\\00", name), name.len() + 2)
+                    };
+                    out.push_str(&format!(
+                        "  %const_ptr_{reg} = getelementptr inbounds [{l} x i8], [{l} x i8]* @{n}, i64 0, i64 0\n",
+                        reg=reg, l=name_len, n=name_const
+                    ));
+                    out.push_str(&format!(
+                        "  %r{reg} = call i64 @jdruby_const_get(i8* %const_ptr_{reg})\n",
+                        reg=reg
+                    ));
                 } else if name.starts_with('@') {
                     let ivar_str = self.string_pool.get(name.as_str()).unwrap();
                     let ilen = name.len() + 1;
