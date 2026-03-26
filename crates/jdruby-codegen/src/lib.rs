@@ -8,7 +8,7 @@ pub mod runtime;
 pub mod utils;
 
 use context::CodegenContext;
-use jdruby_common::Diagnostic;
+use jdruby_common::{Diagnostic, ErrorReporter};
 use jdruby_mir::MirModule;
 
 /// Optimization levels.
@@ -77,8 +77,18 @@ impl CodeGenerator {
         }
     }
 
-    /// Generate LLVM IR from a MIR module.
+    /// Generate LLVM IR from a MIR module, returning Result for compatibility.
     pub fn generate(&mut self, module: &MirModule) -> Result<String, Vec<Diagnostic>> {
+        let (output, mut reporter) = self.generate_with_errors(module);
+        if reporter.has_errors() {
+            Err(reporter.take_diagnostics())
+        } else {
+            Ok(output)
+        }
+    }
+
+    /// Generate LLVM IR from a MIR module with detailed error reporting.
+    pub fn generate_with_errors(&mut self, module: &MirModule) -> (String, jdruby_common::ErrorReporter) {
         self.context.clear();
         self.context.set_module_name(&module.name);
 
@@ -87,20 +97,28 @@ impl CodeGenerator {
         }
 
         let mut output = String::with_capacity(16384);
+        let mut reporter = ErrorReporter::new();
 
         self.emit_header(&mut output);
         self.emit_data_section(&mut output);
         runtime::emit_runtime_decls(&mut output);
 
         for func in &module.functions {
-            instructions::emit_function(func, &self.context, &mut output)?;
+            if let Err(diagnostics) = instructions::emit_function(func, &self.context, &mut output) {
+                for diag in diagnostics {
+                    reporter.report_diagnostic(diag);
+                }
+            }
         }
 
+        // Collect any context errors
         if self.context.has_errors() {
-            Err(self.context.take_diagnostics())
-        } else {
-            Ok(output)
+            for diag in self.context.take_diagnostics() {
+                reporter.report_diagnostic(diag);
+            }
         }
+
+        (output, reporter)
     }
 
     fn emit_header(&self, out: &mut String) {
@@ -190,7 +208,7 @@ mod tests {
         assert!(result.is_ok());
         
         let ir = result.unwrap();
-        assert!(ir.contains("@.str.0 = private unnamed_addr constant"));
+        assert!(ir.contains("@.str.test.0 = private unnamed_addr constant"));
         assert!(ir.contains("c\"hello\\00\""));
     }
 

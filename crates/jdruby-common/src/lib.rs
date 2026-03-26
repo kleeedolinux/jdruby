@@ -9,5 +9,5 @@ mod source;
 pub mod ffi_types;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
-pub use error::JDRubyError;
+pub use error::{JDRubyError, JDRubyResult, CompilationStage, StageError, ErrorReporter};
 pub use source::{SourceFile, SourceSpan};

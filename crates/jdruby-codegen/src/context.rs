@@ -100,6 +100,8 @@ impl CodegenContext {
                     sname
                 ));
             }
+            // Also intern the string for use in jdruby_const_get
+            self.intern_string(name);
         } else if name.starts_with('@') {
             self.intern_string(name);
         }
@@ -111,7 +113,9 @@ impl CodegenContext {
         }
         let id = self.next_str_id;
         self.next_str_id += 1;
-        let name = format!(".str.{}", id);
+        // Prefix with sanitized module name to ensure uniqueness across linked modules
+        let sanitized_module = crate::utils::sanitize_name(&self.module_name);
+        let name = format!(".str.{}.{}", sanitized_module, id);
 
         let escaped = crate::utils::llvm_escape_string(s);
         let byte_len = s.len() + 1;

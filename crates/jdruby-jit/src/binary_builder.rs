@@ -14,6 +14,7 @@ use inkwell::module::Module;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple};
 use inkwell::OptimizationLevel;
 use jdruby_codegen::{CodeGenerator, CodegenConfig, OutputFormat};
+use jdruby_common::JDRubyError;
 use jdruby_mir::MirModule;
 
 /// Configuration for building a standalone binary.
@@ -63,8 +64,8 @@ impl<'ctx> BinaryBuilder<'ctx> {
         }
     }
 
-    /// Add a MIR module to be compiled into the binary.
-    pub fn add_module(&mut self, name: &str, mir: &MirModule) -> Result<(), String> {
+    /// Add a MIR module to be compiled into the binary with detailed error reporting.
+    pub fn add_module_with_errors(&mut self, name: &str, mir: &MirModule) -> Result<(), JDRubyError> {
         let codegen_config = CodegenConfig {
             target_triple: self.config.target_triple.clone(),
             output_format: OutputFormat::LlvmIr,
@@ -72,27 +73,66 @@ impl<'ctx> BinaryBuilder<'ctx> {
         };
 
         let mut codegen = CodeGenerator::new(codegen_config);
-        let ir_text = codegen
-            .generate(mir)
-            .map_err(|e| format!("Code generation failed: {:?}", e))?;
+        let (ir_text, reporter) = codegen.generate_with_errors(mir);
+
+        // Emit any codegen errors first
+        if reporter.has_errors() {
+            reporter.emit_to_cli();
+            return Err(reporter.into_error().unwrap_or_else(|| {
+                JDRubyError::Codegen { message: format!("Code generation failed for module {}", name) }
+            }));
+        }
 
         // Parse the IR text into an inkwell module using MemoryBuffer
+        // Trim trailing whitespace to avoid parsing issues
+        let ir_clean = ir_text.trim_end();
         let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            ir_text.as_bytes(),
+            ir_clean.as_bytes(),
             name,
         );
-        
+
         let module = self
             .context
             .create_module_from_ir(buffer)
-            .map_err(|e| format!("Failed to parse IR: {}", e.to_string()))?;
+            .map_err(|e| {
+                // Extract line number from error if possible
+                let err_str = e.to_string();
+                let line_num = err_str.split(':').nth(1)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
 
-        module
-            .verify()
-            .map_err(|e| format!("Module verification failed: {}", e.to_string()))?;
+                // Get context around the error line
+                let context = if line_num > 0 {
+                    ir_text.lines()
+                        .skip(line_num.saturating_sub(3))
+                        .take(6)
+                        .enumerate()
+                        .map(|(i, line)| format!("{:4} | {}", line_num - 3 + i + 1, line))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    ir_text.lines().take(10).collect::<Vec<_>>().join("\n")
+                };
+
+                JDRubyError::llvm_ir(name.to_string(), err_str, context)
+            })?;
+
+        if let Err(e) = module.verify() {
+            return Err(JDRubyError::llvm_ir(
+                name.to_string(),
+                format!("Module verification failed: {}", e.to_string()),
+                ir_text.lines().take(20).collect::<Vec<_>>().join("\n")
+            ));
+        }
 
         self.modules.insert(name.to_string(), module);
         Ok(())
+    }
+
+    /// Add a MIR module (legacy API, now uses new error system internally).
+    pub fn add_module(&mut self, name: &str, mir: &MirModule) -> Result<(), String> {
+        self.add_module_with_errors(name, mir)
+            .map_err(|e| e.to_string())
     }
 
     /// Get the target machine for the configured target.

@@ -22,5 +22,5 @@ Thumbs.db
 *.exe
 *.mir
 *.hir
-.ll
+*.ll
 *.s

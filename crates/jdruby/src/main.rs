@@ -50,6 +50,10 @@ enum Commands {
         #[arg(long = "emit-ll")]
         emit_ll: bool,
 
+        /// Emit LLVM IR (.ll file) always, even on error
+        #[arg(long = "emit-ll-v")]
+        emit_ll_v: bool,
+
         /// Emit HIR (.hir file)
         #[arg(long = "emit-hir")]
         emit_hir: bool,
@@ -99,11 +103,11 @@ fn main() {
     let result = match cli.command {
         Commands::Lex { file } => cmd_lex(&file),
         Commands::Parse { file } => cmd_parse(&file),
-        Commands::Build { file, output, opt_level, debug, emit_ll, emit_hir, emit_mir, emit_asm, aot, verbose } => {
+        Commands::Build { file, output, opt_level, debug, emit_ll, emit_ll_v, emit_hir, emit_mir, emit_asm, aot, verbose } => {
             if aot {
-                cmd_build(&file, &output, opt_level, debug, emit_ll, emit_hir, emit_mir, emit_asm, verbose)
+                cmd_build(&file, &output, opt_level, debug, emit_ll || emit_ll_v, emit_hir, emit_mir, emit_asm, verbose)
             } else {
-                cmd_build_jit(&file, &output, opt_level, verbose)
+                cmd_build_jit(&file, &output, opt_level, emit_ll_v, verbose)
             }
         }
         Commands::Run { file, interp, tier, verbose } => {
@@ -339,6 +343,7 @@ fn cmd_build_jit(
     file: &PathBuf,
     output: &PathBuf,
     opt_level: u8,
+    emit_ll_v: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use inkwell::context::Context;
@@ -382,6 +387,32 @@ fn cmd_build_jit(
             name: func.name.clone(),
             functions: vec![func.clone()],
         };
+        
+        // Emit IR before parsing if --emit-ll-v is set
+        if emit_ll_v {
+            use jdruby_codegen::{CodeGenerator, CodegenConfig, OutputFormat};
+            let codegen_config = CodegenConfig {
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                output_format: OutputFormat::LlvmIr,
+                ..Default::default()
+            };
+            let mut codegen = CodeGenerator::new(codegen_config);
+            let (ir_text, reporter) = codegen.generate_with_errors(&mir_module);
+            
+            // Always write IR file, even if there are errors
+            let ll_path = std::path::PathBuf::from(format!("{}.ll", func.name.replace('/', "_").replace('#', "_")));
+            if let Err(e) = std::fs::write(&ll_path, &ir_text) {
+                eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
+            } else {
+                eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {} ({} bytes)", ll_path.display(), ir_text.len());
+            }
+            
+            // Also report any codegen errors
+            if reporter.has_errors() {
+                reporter.emit_to_cli();
+            }
+        }
+        
         builder.add_module(&func.name, &mir_module)?;
     }
     

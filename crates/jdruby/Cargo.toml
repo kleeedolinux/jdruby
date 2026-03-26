@@ -20,3 +20,4 @@ jdruby-jit.workspace = true
 clap.workspace = true
 ariadne.workspace = true
 inkwell.workspace = true
+jdruby-codegen.workspace = true
