@@ -241,6 +241,13 @@ pub fn value_ary_len(v: VALUE) -> Option<usize> {
     })
 }
 
+/// Get array element at index.
+pub fn value_ary_entry(v: VALUE, idx: usize) -> Option<VALUE> {
+    with_arena(|arena| {
+        arena.arrays.get(&v).and_then(|a| a.elements.get(idx).copied())
+    })
+}
+
 /// Create a new string VALUE from a Rust string.
 pub fn str_to_value(s: &str) -> VALUE {
     with_arena(|arena| {
