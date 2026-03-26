@@ -37,4 +37,5 @@ pub enum JDRubyError {
 }
 
 /// A type alias for results using `JDRubyError`.
+#[allow(dead_code)]
 pub type JDRubyResult<T> = Result<T, JDRubyError>;

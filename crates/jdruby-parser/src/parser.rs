@@ -52,6 +52,7 @@ impl Parser {
         tok
     }
 
+    #[allow(dead_code)]
     fn peek_kind(&self) -> TokenKind {
         self.current_kind()
     }

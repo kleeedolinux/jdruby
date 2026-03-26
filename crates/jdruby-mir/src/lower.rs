@@ -181,9 +181,9 @@ impl HirLowering {
 
                 // Else block
                 self.start_block(else_label);
-                let mut else_result = self.alloc_reg();
+                let else_result = self.alloc_reg();
                 self.emit(MirInst::LoadConst(else_result, MirConst::Nil));
-                for n in &branch.else_body { else_result = self.lower_node(n); }
+                for n in &branch.else_body { _ = self.lower_node(n); }
                 self.finish_block(MirTerminator::Branch(merge_label.clone()));
 
                 // Merge block

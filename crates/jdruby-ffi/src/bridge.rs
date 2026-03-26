@@ -40,11 +40,13 @@ struct FfiArena {
 }
 
 struct FfiBridgedString {
+    #[allow(dead_code)]
     header: RBasic,
     data: Vec<u8>,
 }
 
 struct FfiBridgedArray {
+    #[allow(dead_code)]
     header: RBasic,
     elements: Vec<VALUE>,
 }

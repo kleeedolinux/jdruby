@@ -53,7 +53,7 @@ pub unsafe extern "C" fn rb_intern(name: *const c_char) -> ID {
 ///
 /// C-extension contract: `const char *rb_id2name(ID id)`
 #[no_mangle]
-pub unsafe extern "C" fn rb_id2name(id: ID) -> *const c_char {
+pub unsafe extern "C" fn rb_id2name(_id: ID) -> *const c_char {
     // In production, this would return a pointer to the interned string.
     // For now, return a static empty string for safety.
     static EMPTY: &[u8] = b"\0";
@@ -132,7 +132,7 @@ pub extern "C" fn rb_ary_new_capa(capa: c_long) -> VALUE {
 
 /// Push an element onto a Ruby array.
 #[no_mangle]
-pub extern "C" fn rb_ary_push(ary: VALUE, val: VALUE) -> VALUE {
+pub extern "C" fn rb_ary_push(ary: VALUE, _val: VALUE) -> VALUE {
     // In production, we'd mutate the array in the arena.
     // For now, return the original array.
     ary
@@ -395,14 +395,14 @@ pub unsafe extern "C" fn rb_raise_api(
 
 /// Get an instance variable.
 #[no_mangle]
-pub extern "C" fn rb_ivar_get(obj: VALUE, id: ID) -> VALUE {
+pub extern "C" fn rb_ivar_get(_obj: VALUE, _id: ID) -> VALUE {
     // Simplified: return nil for now
     RUBY_QNIL
 }
 
 /// Set an instance variable.
 #[no_mangle]
-pub extern "C" fn rb_ivar_set(obj: VALUE, id: ID, val: VALUE) -> VALUE {
+pub extern "C" fn rb_ivar_set(_obj: VALUE, _id: ID, val: VALUE) -> VALUE {
     // Simplified: no-op, return val
     val
 }
@@ -434,7 +434,7 @@ pub extern "C" fn rb_obj_as_string(val: VALUE) -> VALUE {
 
 /// Get the class name of an object.
 #[no_mangle]
-pub extern "C" fn rb_obj_classname_api(obj: VALUE) -> *const c_char {
+pub extern "C" fn rb_obj_classname_api(_obj: VALUE) -> *const c_char {
     static EMPTY: &[u8] = b"Object\0";
     EMPTY.as_ptr() as *const c_char
 }
@@ -607,9 +607,9 @@ pub extern "C" fn jdruby_int_pow(a: VALUE, b: VALUE) -> VALUE {
 /// Dynamic method dispatch from compiled code.
 #[no_mangle]
 pub unsafe extern "C" fn jdruby_send(
-    recv: VALUE,
-    method_name: *const c_char,
-    argc: c_int,
+    _recv: VALUE,
+    _method_name: *const c_char,
+    _argc: c_int,
     // ... variadic VALUE args follow
 ) -> VALUE {
     // For safety, we can't portably extract variadic args in Rust.
