@@ -133,7 +133,6 @@ fn emit_instruction<'ctx>(
     local_allocs: &HashMap<String, PointerValue<'ctx>>,
 ) -> Result<(), Vec<Diagnostic>> {
     let i64_type = llvm_ctx.i64_type();
-    let i8_type = llvm_ctx.i8_type();
     
     match inst {
         MirInst::LoadConst(reg, c) => {

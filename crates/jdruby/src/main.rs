@@ -396,7 +396,8 @@ fn cmd_build_jit(
                 output_format: OutputFormat::LlvmIr,
                 ..Default::default()
             };
-            let mut codegen = CodeGenerator::new(codegen_config);
+            let llvm_context = Context::create();
+            let mut codegen = CodeGenerator::new(codegen_config, &llvm_context);
             let (ir_text, reporter) = codegen.generate_with_errors(&mir_module);
             
             // Always write IR file, even if there are errors

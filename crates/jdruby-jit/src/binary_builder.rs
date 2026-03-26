@@ -72,7 +72,7 @@ impl<'ctx> BinaryBuilder<'ctx> {
             ..Default::default()
         };
 
-        let mut codegen = CodeGenerator::new(codegen_config);
+        let mut codegen = CodeGenerator::new(codegen_config, self.context);
         let (ir_text, reporter) = codegen.generate_with_errors(mir);
 
         // Emit any codegen errors first
@@ -84,10 +84,8 @@ impl<'ctx> BinaryBuilder<'ctx> {
         }
 
         // Parse the IR text into an inkwell module using MemoryBuffer
-        // Trim trailing whitespace to avoid parsing issues
-        let ir_clean = ir_text.trim_end();
         let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            ir_clean.as_bytes(),
+            ir_text.as_bytes(),
             name,
         );
 

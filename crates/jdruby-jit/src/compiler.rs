@@ -186,7 +186,7 @@ impl<'ctx> JitCompiler<'ctx> {
             functions: vec![func.clone()],
         };
 
-        let mut codegen = CodeGenerator::new(config);
+        let mut codegen = CodeGenerator::new(config, self.context);
         match codegen.generate(&module) {
             Ok(ir_text) => self.compile_llvm_ir(&func.name, &ir_text, tier, invocation_count),
             Err(diags) => {

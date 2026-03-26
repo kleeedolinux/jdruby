@@ -4,6 +4,7 @@
 //! Source → Lex → Parse → Semantic → HIR → MIR → Codegen → Link
 
 use std::path::PathBuf;
+use inkwell::context::Context;
 use jdruby_common::{Diagnostic, JDRubyError};
 
 /// Build configuration.
@@ -139,8 +140,9 @@ impl BuildPipeline {
             if self.config.verbose { eprintln!("  → Optimizing MIR..."); }
             jdruby_mir::MirOptimizer::optimize(&mut mir_module);
 
-            // 9. Codegen → LLVM IR
-            if self.config.verbose { eprintln!("  → Generating LLVM IR..."); }
+            // 9. MIR → LLVM IR
+            if self.config.verbose { eprintln!("  → Code generation..."); }
+            let llvm_context = Context::create();
             let codegen_config = jdruby_codegen::CodegenConfig {
                 opt_level: match self.config.opt_level {
                     0 => jdruby_codegen::OptLevel::O0,
@@ -151,7 +153,7 @@ impl BuildPipeline {
                 debug_info: self.config.debug_info,
                 ..Default::default()
             };
-            let mut codegen = jdruby_codegen::CodeGenerator::new(codegen_config);
+            let mut codegen = jdruby_codegen::CodeGenerator::new(codegen_config, &llvm_context);
             match codegen.generate(&mir_module) {
                 Ok(ir) => {
                     // Write .ll file with the source file stem

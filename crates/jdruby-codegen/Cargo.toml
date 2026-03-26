@@ -8,3 +8,4 @@ description = "LLVM IR code generation for JDRuby"
 jdruby-common.workspace = true
 jdruby-mir.workspace = true
 jdruby-ffi.workspace = true
+inkwell.workspace = true
