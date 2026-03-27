@@ -11,3 +11,4 @@ crate-type = ["lib", "cdylib", "staticlib"]
 jdruby-common.workspace = true
 jdruby-runtime.workspace = true
 jdgc = { path = "../jdgc" }
+libc = "0.2"

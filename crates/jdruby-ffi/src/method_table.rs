@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::value::{VALUE, ID};
+use crate::value::{VALUE, ID, RUBY_QNIL};
 
 /// A C-extension method function pointer.
 ///
@@ -47,6 +47,12 @@ pub struct MethodTable {
     class_names: HashMap<VALUE, String>,
     /// Next class ID
     next_class_id: VALUE,
+    /// Instance variables: (object, name) → value
+    instance_vars: HashMap<(VALUE, String), VALUE>,
+    /// Hash storage: (hash_id, key) → value
+    hash_storage: HashMap<(VALUE, VALUE), VALUE>,
+    /// Constants: (class, name) → value
+    constants: HashMap<(VALUE, String), VALUE>,
 }
 
 impl MethodTable {
@@ -59,6 +65,9 @@ impl MethodTable {
             class_hierarchy: HashMap::new(),
             class_names: HashMap::new(),
             next_class_id: 0x1_0000, // class IDs start high to avoid tag collisions
+            instance_vars: HashMap::new(),
+            hash_storage: HashMap::new(),
+            constants: HashMap::new(),
         };
         // Pre-intern common symbols
         for name in ["initialize", "new", "to_s", "inspect", "class",
@@ -128,11 +137,63 @@ impl MethodTable {
         id
     }
 
-    /// Get a class VALUE by name.
+/// Get a class VALUE by name.
     pub fn class_by_name(&self, name: &str) -> Option<VALUE> {
         self.class_names.iter()
             .find(|(_, n)| n.as_str() == name)
             .map(|(&v, _)| v)
+    }
+
+    /// Get instance variable from object
+    pub fn get_ivar(&self, obj: VALUE, name: &str) -> VALUE {
+        self.instance_vars.get(&(obj, name.to_string())).copied().unwrap_or(RUBY_QNIL)
+    }
+
+    /// Set instance variable on object
+    pub fn set_ivar(&mut self, obj: VALUE, name: &str, val: VALUE) {
+        self.instance_vars.insert((obj, name.to_string()), val);
+    }
+
+    /// Hash operations: set key-value pair
+    pub fn hash_aset(&mut self, hash: VALUE, key: VALUE, val: VALUE) {
+        self.hash_storage.insert((hash, key), val);
+    }
+
+    /// Hash operations: get value by key
+    pub fn hash_aref(&self, hash: VALUE, key: VALUE) -> VALUE {
+        self.hash_storage.get(&(hash, key)).copied().unwrap_or(RUBY_QNIL)
+    }
+
+    /// Set a constant on a class/module
+    pub fn set_constant(&mut self, klass: VALUE, name: &str, val: VALUE) {
+        self.constants.insert((klass, name.to_string()), val);
+    }
+
+    /// Look up a constant
+    pub fn lookup_constant(&self, klass: VALUE, name: &str) -> Option<VALUE> {
+        // First check in the class itself
+        if let Some(&val) = self.constants.get(&(klass, name.to_string())) {
+            return Some(val);
+        }
+        // Walk up the class hierarchy
+        let mut current = klass;
+        loop {
+            if let Some(&val) = self.constants.get(&(current, name.to_string())) {
+                return Some(val);
+            }
+            match self.class_hierarchy.get(&current) {
+                Some(&super_klass) if super_klass != 0 => {
+                    current = super_klass;
+                }
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// Check if a constant is defined
+    pub fn constant_defined(&self, klass: VALUE, name: &str) -> bool {
+        self.lookup_constant(klass, name).is_some()
     }
 }
 

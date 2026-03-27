@@ -5,6 +5,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
+use inkwell::AddressSpace;
 use jdruby_common::Diagnostic;
 use jdruby_mir::{MirFunction, MirBlock, MirInst, MirTerminator, MirConst, MirBinOp, MirUnOp};
 use crate::context::CodegenContext;
@@ -274,7 +275,7 @@ fn emit_load_const<'ctx>(
             // GEP to get pointer to first element
             let ptr = global.as_pointer_value();
             let zero = llvm_ctx.i64_type().const_int(0, false);
-            let str_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "str_ptr").unwrap() };
+            let str_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "str_ptr").unwrap() };
             
             // Call jdruby_str_new
             let fn_val = get_runtime_fn_value(module, "jdruby_str_new").unwrap();
@@ -299,7 +300,7 @@ fn emit_load_const<'ctx>(
             
             let ptr = global.as_pointer_value();
             let zero = llvm_ctx.i64_type().const_int(0, false);
-            let sym_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "sym_ptr").unwrap() };
+            let sym_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "sym_ptr").unwrap() };
             
             let fn_val = get_runtime_fn_value(module, "jdruby_sym_intern").unwrap();
             let val = builder.build_call(fn_val, &[sym_ptr.into()], "sym_intern").unwrap();
@@ -564,6 +565,7 @@ fn emit_call<'ctx>(
             
             // Create method name string with unique name
             let i8_type = llvm_ctx.i8_type();
+            let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
             let name_len = name.len();
             let array_type = i8_type.array_type((name_len + 1) as u32);
             let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -575,16 +577,25 @@ fn emit_call<'ctx>(
             
             let ptr = global.as_pointer_value();
             let zero = llvm_ctx.i64_type().const_int(0, false);
-            let meth_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
+            let meth_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
             
             let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
-            let mut all_args: Vec<_> = vec![self_val.into(), meth_ptr.into(), argc_val.into()];
-            for &arg in args {
-                let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
-                all_args.push(arg_val.into());
-            }
             
-            let val = builder.build_call(fn_val, all_args.as_slice(), "send").unwrap();
+            // Build argv array on stack if there are arguments
+            let argv_ptr = if args.is_empty() {
+                i64_ptr_type.const_null()
+            } else {
+                let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "argv").unwrap();
+                for (i, &arg) in args.iter().enumerate() {
+                    let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+                    let idx = i64_type.const_int(i as u64, false);
+                    let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("argv_{}", i)).unwrap() };
+                    builder.build_store(elem_ptr, arg_val).unwrap();
+                }
+                unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "argv_ptr").unwrap() }
+            };
+            
+            let val = builder.build_call(fn_val, &[self_val.into(), meth_ptr.into(), argc_val.into(), argv_ptr.into()], "send").unwrap();
             Ok(val.try_as_basic_value().unwrap_basic())
         }
     }
@@ -622,6 +633,7 @@ fn emit_method_call<'ctx>(
     }
     
     let i8_type = llvm_ctx.i8_type();
+    let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
     
     let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
     
@@ -637,16 +649,32 @@ fn emit_method_call<'ctx>(
     
     let ptr = global.as_pointer_value();
     let zero = llvm_ctx.i64_type().const_int(0, false);
-    let meth_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
+    let meth_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
     
     let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
-    let mut all_args: Vec<_> = vec![recv_val.into(), meth_ptr.into(), argc_val.into()];
-    for &arg in args {
-        let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
-        all_args.push(arg_val.into());
-    }
     
-    let val = builder.build_call(fn_val, all_args.as_slice(), "send").unwrap();
+    // Build argv array on stack if there are arguments
+    let argv_ptr = if args.is_empty() {
+        // Pass null pointer for empty args
+        i64_ptr_type.const_null()
+    } else {
+        // Allocate array on stack
+        let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "argv").unwrap();
+        
+        // Store each argument into the array
+        for (i, &arg) in args.iter().enumerate() {
+            let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+            let idx = i64_type.const_int(i as u64, false);
+            let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("argv_{}", i)).unwrap() };
+            builder.build_store(elem_ptr, arg_val).unwrap();
+        }
+        
+        // Get pointer to first element
+        let argv_ptr_val = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "argv_ptr").unwrap() };
+        argv_ptr_val
+    };
+    
+    let val = builder.build_call(fn_val, &[recv_val.into(), meth_ptr.into(), argc_val.into(), argv_ptr.into()], "send").unwrap();
     Ok(val.try_as_basic_value().unwrap_basic())
 }
 
@@ -689,7 +717,7 @@ fn emit_load<'ctx>(
         
         let ptr = global.as_pointer_value();
         let zero = llvm_ctx.i64_type().const_int(0, false);
-        let ivar_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "ivar_ptr").unwrap() };
+        let ivar_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "ivar_ptr").unwrap() };
         
         let fn_val = get_runtime_fn_value(module, "jdruby_ivar_get").unwrap();
         let val = builder.build_call(fn_val, &[self_val.into(), ivar_ptr.into()], "ivar_get").unwrap();
@@ -741,7 +769,7 @@ fn emit_store<'ctx>(
         
         let ptr = global.as_pointer_value();
         let zero = llvm_ctx.i64_type().const_int(0, false);
-        let ivar_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "ivar_ptr").unwrap() };
+        let ivar_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "ivar_ptr").unwrap() };
         
         let fn_val = get_runtime_fn_value(module, "jdruby_ivar_set").unwrap();
         builder.build_call(fn_val, &[self_val.into(), ivar_ptr.into(), reg_val.into()], "").unwrap();
@@ -777,7 +805,7 @@ fn emit_class_new<'ctx>(
     
     let ptr = global.as_pointer_value();
     let zero = llvm_ctx.i64_type().const_int(0, false);
-    let name_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "name_ptr").unwrap() };
+    let name_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "name_ptr").unwrap() };
     
     // Superclass
     let sc_val = if let Some(sc) = superclass {
@@ -791,7 +819,7 @@ fn emit_class_new<'ctx>(
         sc_global.set_initializer(&i8_type.const_array(&sc_bytes));
         
         let sc_ptr = sc_global.as_pointer_value();
-        let sc_name_ptr = unsafe { builder.build_gep(i8_type, sc_ptr, &[zero, zero], "sc_name_ptr").unwrap() };
+        let sc_name_ptr = unsafe { builder.build_gep(sc_array_type, sc_ptr, &[zero, zero], "sc_name_ptr").unwrap() };
         
         let const_fn = get_runtime_fn_value(module, "jdruby_const_get").unwrap();
         let sc_val_call = builder.build_call(const_fn, &[sc_name_ptr.into()], "sc_get").unwrap();
@@ -833,7 +861,7 @@ fn emit_def_method<'ctx>(
     
     let meth_ptr = meth_global.as_pointer_value();
     let zero = llvm_ctx.i64_type().const_int(0, false);
-    let meth_name_ptr = unsafe { builder.build_gep(i8_type, meth_ptr, &[zero, zero], "meth_name_ptr").unwrap() };
+    let meth_name_ptr = unsafe { builder.build_gep(meth_array_type, meth_ptr, &[zero, zero], "meth_name_ptr").unwrap() };
     
     // Function name with unique suffix - sanitize the function name for LLVM
     let sanitized_func_name = sanitize_name(func_name);
@@ -847,7 +875,7 @@ fn emit_def_method<'ctx>(
     func_global.set_initializer(&i8_type.const_array(&func_bytes));
     
     let func_ptr = func_global.as_pointer_value();
-    let func_name_ptr = unsafe { builder.build_gep(i8_type, func_ptr, &[zero, zero], "func_name_ptr").unwrap() };
+    let func_name_ptr = unsafe { builder.build_gep(func_array_type, func_ptr, &[zero, zero], "func_name_ptr").unwrap() };
     
     let fn_val = get_runtime_fn_value(module, "jdruby_def_method").unwrap();
     builder.build_call(fn_val, &[class_val.into(), meth_name_ptr.into(), func_name_ptr.into()], "").unwrap();
@@ -881,7 +909,7 @@ fn emit_include_module<'ctx>(
     
     let mod_ptr = mod_global.as_pointer_value();
     let zero = llvm_ctx.i64_type().const_int(0, false);
-    let mod_name_ptr = unsafe { builder.build_gep(i8_type, mod_ptr, &[zero, zero], "mod_name_ptr").unwrap() };
+    let mod_name_ptr = unsafe { builder.build_gep(mod_array_type, mod_ptr, &[zero, zero], "mod_name_ptr").unwrap() };
     
     let const_fn = get_runtime_fn_value(module, "jdruby_const_get").unwrap();
     let mod_val = builder.build_call(const_fn, &[mod_name_ptr.into()], "mod_get").unwrap()
@@ -898,11 +926,19 @@ fn emit_include_module<'ctx>(
     incl_global.set_initializer(&i8_type.const_array(&incl_bytes));
     
     let incl_ptr = incl_global.as_pointer_value();
-    let incl_name_ptr = unsafe { builder.build_gep(i8_type, incl_ptr, &[zero, zero], "incl_name_ptr").unwrap() };
+    let incl_name_ptr = unsafe { builder.build_gep(incl_array_type, incl_ptr, &[zero, zero], "incl_name_ptr").unwrap() };
     
     let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
     let argc_val = llvm_ctx.i32_type().const_int(1, false);
-    builder.build_call(fn_val, &[class_val.into(), incl_name_ptr.into(), argc_val.into(), mod_val.into()], "").unwrap();
+    
+    // Build argv array with mod_val
+    let argv_alloca = builder.build_alloca(i64_type.array_type(1), "argv").unwrap();
+    let zero = llvm_ctx.i64_type().const_int(0, false);
+    let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(1), argv_alloca, &[zero, zero], "argv_0").unwrap() };
+    builder.build_store(elem_ptr, mod_val).unwrap();
+    let argv_ptr = unsafe { builder.build_gep(i64_type.array_type(1), argv_alloca, &[zero, zero], "argv_ptr").unwrap() };
+    
+    builder.build_call(fn_val, &[class_val.into(), incl_name_ptr.into(), argc_val.into(), argv_ptr.into()], "").unwrap();
     
     Ok(())
 }

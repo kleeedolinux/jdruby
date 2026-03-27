@@ -5,6 +5,7 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
+use libc;
 
 use crate::value::*;
 use crate::bridge;
@@ -139,7 +140,14 @@ pub extern "C" fn rb_ary_new_capa(capa: c_long) -> VALUE {
 }
 
 #[no_mangle]
-pub extern "C" fn rb_ary_push(ary: VALUE, _elem: VALUE) -> VALUE { ary }
+pub extern "C" fn rb_ary_push(ary: VALUE, elem: VALUE) -> VALUE {
+    // Convert VALUE to RubyValue, push element, convert back
+    let mut rv = bridge::value_to_jdruby(ary);
+    if let jdruby_runtime::value::RubyValue::Array(ref mut vec) = rv {
+        vec.push(bridge::value_to_jdruby(elem));
+    }
+    ary
+}
 
 #[no_mangle]
 pub extern "C" fn rb_ary_len(ary: VALUE) -> c_long {
@@ -156,10 +164,20 @@ pub extern "C" fn rb_hash_new() -> VALUE {
 }
 
 #[no_mangle]
-pub extern "C" fn rb_hash_aset(_hash: VALUE, _key: VALUE, val: VALUE) -> VALUE { val }
+pub extern "C" fn rb_hash_aset(hash: VALUE, key: VALUE, val: VALUE) -> VALUE {
+    // Store in method table's hash storage
+    method_table::with_method_table(|tbl| {
+        tbl.hash_aset(hash, key, val);
+    });
+    val
+}
 
 #[no_mangle]
-pub extern "C" fn rb_hash_aref(_hash: VALUE, _key: VALUE) -> VALUE { RUBY_QNIL }
+pub extern "C" fn rb_hash_aref(hash: VALUE, key: VALUE) -> VALUE {
+    method_table::with_method_table(|tbl| {
+        tbl.hash_aref(hash, key)
+    })
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Type Predicates
@@ -178,10 +196,24 @@ pub extern "C" fn rb_type(v: VALUE) -> c_int {
 pub extern "C" fn rb_integer_p(v: VALUE) -> c_int { if rb_fixnum_p(v) { 1 } else { 0 } }
 
 #[no_mangle]
-pub extern "C" fn rb_string_p(_v: VALUE) -> c_int { 0 }
+pub extern "C" fn rb_string_p(v: VALUE) -> c_int {
+    // Check if it's a heap pointer and look up in registry
+    if v & 0b111 == 0 && v != 0 && v != RUBY_QNIL && v != RUBY_QTRUE && v != RUBY_QFALSE {
+        // Potential heap pointer - check if it's a string
+        let is_string = bridge::value_to_str(v).is_some();
+        return if is_string { 1 } else { 0 };
+    }
+    0
+}
 
 #[no_mangle]
-pub extern "C" fn rb_array_p(_v: VALUE) -> c_int { 0 }
+pub extern "C" fn rb_array_p(v: VALUE) -> c_int {
+    if v & 0b111 == 0 && v != 0 && v != RUBY_QNIL && v != RUBY_QTRUE && v != RUBY_QFALSE {
+        let is_array = bridge::value_ary_len(v).is_some();
+        return if is_array { 1 } else { 0 };
+    }
+    0
+}
 
 #[no_mangle]
 pub extern "C" fn rb_hash_p(_v: VALUE) -> c_int { 0 }
@@ -288,23 +320,55 @@ pub extern "C" fn rb_hash_foreach(_hash: VALUE, _func: *const c_void, _arg: VALU
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[no_mangle]
-pub extern "C" fn rb_iv_get(_obj: VALUE, _name: *const c_char) -> VALUE { RUBY_QNIL }
+pub unsafe extern "C" fn rb_iv_get(obj: VALUE, name: *const c_char) -> VALUE {
+    if name.is_null() { return RUBY_QNIL; }
+    let ivar_name = CStr::from_ptr(name).to_str().unwrap_or("");
+    if ivar_name.is_empty() { return RUBY_QNIL; }
+    
+    method_table::with_method_table(|tbl| {
+        tbl.get_ivar(obj, ivar_name)
+    })
+}
 
 #[no_mangle]
-pub unsafe extern "C" fn rb_iv_set(_obj: VALUE, _name: *const c_char, val: VALUE) -> VALUE { val }
+pub unsafe extern "C" fn rb_iv_set(obj: VALUE, name: *const c_char, val: VALUE) -> VALUE {
+    if name.is_null() { return val; }
+    let ivar_name = CStr::from_ptr(name).to_str().unwrap_or("");
+    if ivar_name.is_empty() { return val; }
+    
+    method_table::with_method_table(|tbl| {
+        tbl.set_ivar(obj, ivar_name, val);
+    });
+    val
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Constants
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[no_mangle]
-pub extern "C" fn rb_const_get(_klass: VALUE, _name: ID) -> VALUE { RUBY_QNIL }
+pub extern "C" fn rb_const_get(klass: VALUE, name: ID) -> VALUE {
+    let name_str = method_table::rb_id2name_str(name).unwrap_or_default();
+    method_table::with_method_table(|tbl| {
+        tbl.lookup_constant(klass, &name_str).unwrap_or(RUBY_QNIL)
+    })
+}
 
 #[no_mangle]
-pub extern "C" fn rb_const_set(_klass: VALUE, _name: ID, _val: VALUE) {}
+pub extern "C" fn rb_const_set(klass: VALUE, name: ID, val: VALUE) {
+    let name_str = method_table::rb_id2name_str(name).unwrap_or_default();
+    method_table::with_method_table(|tbl| {
+        tbl.set_constant(klass, &name_str, val);
+    });
+}
 
 #[no_mangle]
-pub extern "C" fn rb_const_defined(_klass: VALUE, _name: ID) -> c_int { 0 }
+pub extern "C" fn rb_const_defined(klass: VALUE, name: ID) -> c_int {
+    let name_str = method_table::rb_id2name_str(name).unwrap_or_default();
+    method_table::with_method_table(|tbl| {
+        if tbl.constant_defined(klass, &name_str) { 1 } else { 0 }
+    })
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // GC Functions
@@ -395,14 +459,42 @@ pub unsafe extern "C" fn rb_funcallv(recv: VALUE, mid: ID, argc: c_int, argv: *c
 }
 
 unsafe fn dispatch_c_method(func_ptr: usize, arity: i32, recv: VALUE, args: &[VALUE]) -> VALUE {
+    // If func_ptr is a small number, it's likely a string ID, not a real function pointer
+    // In that case, we need to look up the actual function by name
+    let actual_func_ptr = if func_ptr < 0x1000 {
+        // This is likely a string ID, resolve it to an actual function
+        if let Some(func_name) = method_table::rb_id2name_str(func_ptr) {
+            // Check if this is a built-in Ruby method (starts with capital letter and contains __)
+            if func_name.contains("__") && func_name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                // This is likely a Ruby class method, not a C function
+                // Return RUBY_QNIL to let the Ruby runtime handle it through built-in dispatch
+                return RUBY_QNIL;
+            }
+            
+            // Try to resolve the function symbol from the current binary
+            let func_name_cstr = std::ffi::CString::new(func_name.clone()).unwrap();
+            let symbol = libc::dlsym(libc::RTLD_DEFAULT, func_name_cstr.as_ptr());
+            if symbol.is_null() {
+                // Silently return RUBY_QNIL for unresolved symbols (these are likely Ruby methods)
+                return RUBY_QNIL;
+            }
+            symbol as usize
+        } else {
+            // Silently return RUBY_QNIL for unknown function IDs
+            return RUBY_QNIL;
+        }
+    } else {
+        func_ptr
+    };
+    
     match arity {
-        0 => std::mem::transmute::<usize, extern "C" fn(VALUE) -> VALUE>(func_ptr)(recv),
+        0 => std::mem::transmute::<usize, extern "C" fn(VALUE) -> VALUE>(actual_func_ptr)(recv),
         1 => {
-            let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE) -> VALUE>(func_ptr);
+            let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE) -> VALUE>(actual_func_ptr);
             f(recv, args.first().copied().unwrap_or(RUBY_QNIL))
         }
         2 => {
-            let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE, VALUE) -> VALUE>(func_ptr);
+            let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE, VALUE) -> VALUE>(actual_func_ptr);
             f(recv, args.first().copied().unwrap_or(RUBY_QNIL), args.get(1).copied().unwrap_or(RUBY_QNIL))
         }
         _ => RUBY_QNIL,
@@ -425,7 +517,7 @@ pub extern "C" fn rb_io_puts(val: VALUE) {
 #[no_mangle]
 pub unsafe extern "C" fn rb_raise(_exc_class: VALUE, msg: *const c_char) {
     eprintln!("RuntimeError: {}", CStr::from_ptr(msg).to_str().unwrap_or("unknown"));
-    std::process::abort();
+    std::process::exit(1);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -485,10 +577,55 @@ pub extern "C" fn jdruby_to_s(val: VALUE) -> VALUE {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jdruby_send(recv: VALUE, method: *const c_char, _argc: i32) -> VALUE {
-    let _method_name = CStr::from_ptr(method).to_str().unwrap_or("unknown");
-    // For now, just return recv - TODO: implement proper method dispatch
-    recv
+pub unsafe extern "C" fn jdruby_send(recv: VALUE, method: *const c_char, argc: c_int, argv: *const VALUE) -> VALUE {
+    if method.is_null() { return RUBY_QNIL; }
+    let method_name = CStr::from_ptr(method).to_str().unwrap_or("");
+    if method_name.is_empty() { return RUBY_QNIL; }
+    
+    // Collect arguments from pointer
+    let collected_args: Vec<VALUE> = if argc > 0 && !argv.is_null() {
+        std::slice::from_raw_parts(argv, argc as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    // Look up method in method table
+    let entry = method_table::with_method_table(|tbl| {
+        tbl.lookup_method(recv, method_name).cloned()
+    });
+    
+    if let Some(entry) = entry {
+        dispatch_c_method(entry.func, entry.arity, recv, &collected_args)
+    } else {
+        // Built-in method dispatch
+        match method_name {
+            "puts" => {
+                for arg in &collected_args {
+                    rb_io_puts(*arg);
+                }
+                RUBY_QNIL
+            }
+            "print" => {
+                for arg in &collected_args {
+                    let s = bridge::value_to_jdruby(*arg).to_ruby_string();
+                    print!("{}", s);
+                }
+                RUBY_QNIL
+            }
+            "to_s" => {
+                if argc == 0 {
+                    jdruby_to_s(recv)
+                } else {
+                    RUBY_QNIL
+                }
+            }
+            "inspect" => jdruby_to_s(recv),
+            "class" => {
+                bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Class((recv & 0xFFF0) as u64))
+            }
+            _ => RUBY_QNIL
+        }
+    }
 }
 
 #[no_mangle]
@@ -502,36 +639,67 @@ pub extern "C" fn jdruby_truthy(val: VALUE) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn jdruby_class_new(name: *const c_char, _superclass: VALUE) -> VALUE {
-    let _class_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Anonymous") };
-    // For now, return a placeholder - TODO: implement proper class creation
-    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Class(42)) // Placeholder class ID
+pub extern "C" fn jdruby_class_new(name: *const c_char, superclass: VALUE) -> VALUE {
+    if name.is_null() { return RUBY_QNIL; }
+    let class_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Anonymous") };
+    
+    // Create new class via method table
+    method_table::with_method_table(|tbl| {
+        tbl.define_class(class_name, superclass)
+    })
 }
 
 #[no_mangle]
-pub extern "C" fn jdruby_def_method(_class: VALUE, name: *const c_char, func: *const c_char) {
-    // TODO: implement method definition
-    let _method_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("unknown") };
-    let _func_name = unsafe { CStr::from_ptr(func).to_str().unwrap_or("unknown") };
-    eprintln!("Defining method on class with function");
+pub extern "C" fn jdruby_def_method(class: VALUE, name: *const c_char, func: *const c_char) {
+    if name.is_null() || func.is_null() { return; }
+    let method_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("") };
+    let func_name = unsafe { CStr::from_ptr(func).to_str().unwrap_or("") };
+    
+    // Register the method in the method table
+    let _method_id = method_table::rb_intern_str(method_name);
+    let func_id = method_table::rb_intern_str(func_name);
+    
+    // Store in method table with the class
+    method_table::with_method_table(|tbl| {
+        // Store method mapping: (class, method_name) -> (func_name as callable reference)
+        // The actual function pointer resolution happens at dispatch time
+        tbl.define_method(class, method_name, func_id as usize, 0);
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn jdruby_const_get(name: *const c_char) -> VALUE {
-    let _const_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Object") };
-    // For now, return Object - TODO: implement proper constant lookup
-    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Class(42)) // Placeholder class ID
+    if name.is_null() { return RUBY_QNIL; }
+    let const_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Object") };
+    
+    // Look up class by name in method table
+    method_table::with_method_table(|tbl| {
+        tbl.class_by_name(const_name).unwrap_or(RUBY_QNIL)
+    })
 }
 
 #[no_mangle]
-pub extern "C" fn jdruby_ivar_get(_obj: VALUE, _name: *const c_char) -> VALUE {
-    // TODO: implement instance variable access
-    RUBY_QNIL
+pub extern "C" fn jdruby_ivar_get(obj: VALUE, name: *const c_char) -> VALUE {
+    if name.is_null() { return RUBY_QNIL; }
+    let ivar_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("") };
+    if ivar_name.is_empty() { return RUBY_QNIL; }
+    
+    // Get instance variable from object storage
+    method_table::with_method_table(|tbl| {
+        tbl.get_ivar(obj, ivar_name)
+    })
 }
 
 #[no_mangle]
-pub extern "C" fn jdruby_ivar_set(_obj: VALUE, _name: *const c_char, _val: VALUE) {
-    // TODO: implement instance variable setting
+pub extern "C" fn jdruby_ivar_set(obj: VALUE, name: *const c_char, val: VALUE) {
+    if name.is_null() { return; }
+    let ivar_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("") };
+    if ivar_name.is_empty() { return; }
+    
+    // Set instance variable on object
+    method_table::with_method_table(|tbl| {
+        tbl.set_ivar(obj, ivar_name, val);
+    });
 }
 
 // Arithmetic operations
@@ -649,4 +817,51 @@ pub extern "C" fn jdruby_ge(a: VALUE, b: VALUE) -> bool {
     } else {
         false
     }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_print(val: VALUE) {
+    let s = bridge::value_to_jdruby(val).to_ruby_string();
+    print!("{}", s);
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_p(val: VALUE) -> VALUE {
+    let s = bridge::value_to_jdruby(val).to_ruby_string();
+    println!("{}", s);
+    val
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_raise(_exc_class: VALUE, msg: *const c_char, _argc: c_int, _argv: *const VALUE) {
+    let msg_str = if msg.is_null() {
+        "unknown error"
+    } else {
+        CStr::from_ptr(msg).to_str().unwrap_or("unknown error")
+    };
+    eprintln!("RuntimeError: {}", msg_str);
+    std::process::exit(1);
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_const_set(_name: *const c_char, _val: VALUE) {
+    // TODO: Implement proper constant setting
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_call(_func: *const c_char, _argc: c_int, _argv: *const VALUE) -> VALUE {
+    // TODO: Implement block/proc calling
+    RUBY_QNIL
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_yield(_argc: c_int, _argv: *const VALUE) -> VALUE {
+    // TODO: Implement yield for blocks
+    RUBY_QNIL
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_block_given() -> bool {
+    // TODO: Implement block_given? check
+    false
 }

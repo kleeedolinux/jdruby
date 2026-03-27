@@ -66,16 +66,16 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     // String operations
     RuntimeFn { name: "jdruby_str_concat", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_to_s", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
-    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: true },
-    RuntimeFn { name: "jdruby_call", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I32], variadic: true },
-    RuntimeFn { name: "jdruby_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: true },
+    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_call", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32, RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_block_given", ret_type: RuntimeType::I1, param_types: &[], variadic: false },
     
     // I/O
     RuntimeFn { name: "jdruby_puts", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_print", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_p", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
-    RuntimeFn { name: "jdruby_raise", ret_type: RuntimeType::Void, param_types: &[RuntimeType::Ptr], variadic: true },
+    RuntimeFn { name: "jdruby_raise", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
     
     // Arithmetic
     RuntimeFn { name: "jdruby_int_add", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },

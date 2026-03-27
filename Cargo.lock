@@ -329,6 +329,7 @@ dependencies = [
  "jdgc",
  "jdruby-common",
  "jdruby-runtime",
+ "libc",
 ]
 
 [[package]]
