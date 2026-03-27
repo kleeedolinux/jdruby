@@ -6,21 +6,25 @@
 //!
 //! ## Architecture
 //!
-//! - **VALUE**: MRI-compatible tagged pointer (`usize`).
-//!   - Bit 0 = 1: Fixnum (`value >> 1`)
-//!   - `0x00`: `Qfalse`
-//!   - `0x02`: `Qtrue`
-//!   - `0x04`: `Qnil`
-//!   - `0x06`: `Qundef`
-//!   - Even pointer: heap object (`RBasic*`)
-//!
-//! - **Bridge Layer**: Converts between JDRuby's `RubyValue` (Rust enum)
-//!   and MRI's `VALUE` (tagged `usize`).
-//!
-//! - **Method Table**: Global registry where `rb_define_method` stores
-//!   C-function pointers, and `rb_funcall` dispatches through.
+//! - **core/**: Fundamental types, constants, and type predicates
+//! - **storage/**: Split storage tables (symbols, classes, ivars, constants, methods)
+//! - **bridge/**: VALUE ↔ RubyValue conversion with JDGC integration
+//! - **capi/**: Modular C API implementation (string, array, hash, etc.)
 
-pub mod value;
+pub mod core;
+pub mod storage;
 pub mod bridge;
-pub mod ruby_capi;
-pub mod method_table;
+pub mod capi;
+
+// Re-export commonly used types for backward compatibility
+pub use core::{VALUE, ID, RubyType, RBasic};
+pub use core::{
+    RUBY_QNIL, RUBY_QTRUE, RUBY_QFALSE, RUBY_QUNDEF,
+    RUBY_FIXNUM_FLAG, RUBY_SYMBOL_FLAG, RUBY_FLONUM_MASK, RUBY_FLONUM_FLAG,
+    RSTRING_EMBED_LEN_MAX, RARRAY_EMBED_LEN_MAX,
+};
+pub use core::{
+    rb_fixnum_p, rb_nil_p, rb_true_p, rb_false_p, rb_symbol_p, rb_flonum_p,
+    rb_special_const_p, rb_test, rb_int2fix, rb_fix2long, rb_id2sym, rb_sym2id,
+    rb_type_from_flags,
+};
