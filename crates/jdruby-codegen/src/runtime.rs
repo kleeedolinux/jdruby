@@ -63,8 +63,10 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     RuntimeFn { name: "jdruby_hash_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: false },
     RuntimeFn { name: "jdruby_bool", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I1], variadic: false },
     
-    // Method dispatch
-    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: false },
+    // String operations
+    RuntimeFn { name: "jdruby_str_concat", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_to_s", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: true },
     RuntimeFn { name: "jdruby_call", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I32], variadic: true },
     RuntimeFn { name: "jdruby_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: true },
     RuntimeFn { name: "jdruby_block_given", ret_type: RuntimeType::I1, param_types: &[], variadic: false },

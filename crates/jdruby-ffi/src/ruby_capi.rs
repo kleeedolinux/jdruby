@@ -471,6 +471,20 @@ pub extern "C" fn jdruby_bool(val: bool) -> VALUE {
 }
 
 #[no_mangle]
+pub extern "C" fn jdruby_str_concat(a: VALUE, b: VALUE) -> VALUE {
+    let s1 = bridge::value_to_jdruby(a).to_ruby_string();
+    let s2 = bridge::value_to_jdruby(b).to_ruby_string();
+    let concat = format!("{}{}", s1, s2);
+    bridge::str_to_value(&concat)
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_to_s(val: VALUE) -> VALUE {
+    let s = bridge::value_to_jdruby(val).to_ruby_string();
+    bridge::str_to_value(&s)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn jdruby_send(recv: VALUE, method: *const c_char, _argc: i32) -> VALUE {
     let _method_name = CStr::from_ptr(method).to_str().unwrap_or("unknown");
     // For now, just return recv - TODO: implement proper method dispatch

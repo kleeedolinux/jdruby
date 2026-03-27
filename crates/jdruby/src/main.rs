@@ -34,9 +34,9 @@ enum Commands {
         /// Path to the Ruby source file
         file: PathBuf,
 
-        /// Output binary path
-        #[arg(short, long, default_value = "a.out")]
-        output: PathBuf,
+        /// Output binary path (defaults to input filename without extension)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
 
         /// Optimization level (0-3)
         #[arg(short = 'O', long, default_value = "2")]
@@ -107,6 +107,12 @@ fn main() {
         Commands::Lex { file } => cmd_lex(&file),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Build { file, output, opt_level, debug, emit_ll, emit_ll_v, emit_hir, emit_mir, emit_asm, aot, verbose } => {
+            // Derive output name from input file if not specified
+            let output = output.unwrap_or_else(|| {
+                file.file_stem()
+                    .map(|s| PathBuf::from(s.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| PathBuf::from("a.out"))
+            });
             if aot {
                 cmd_build(&file, &output, opt_level, debug, emit_ll || emit_ll_v, emit_hir, emit_mir, emit_asm, verbose)
             } else {

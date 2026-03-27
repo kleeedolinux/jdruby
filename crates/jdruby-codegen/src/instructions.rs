@@ -552,8 +552,15 @@ fn emit_call<'ctx>(
         _ => {
             // Default: call jdruby_send with self
             let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
-            let self_alloca = local_allocs.get("self").copied().unwrap();
-            let self_val = builder.build_load(i64_type, self_alloca, "self").unwrap();
+            
+            // Get self value - for top-level functions without self param, use nil
+            let self_val = if let Some(self_alloca) = local_allocs.get("self") {
+                builder.build_load(i64_type, *self_alloca, "self").unwrap()
+            } else {
+                // Top-level code without self - use nil as receiver
+                let global = module.get_global("JDRUBY_NIL").unwrap();
+                builder.build_load(i64_type, global.as_pointer_value(), "nil_self").unwrap()
+            };
             
             // Create method name string with unique name
             let i8_type = llvm_ctx.i8_type();
@@ -594,10 +601,29 @@ fn emit_method_call<'ctx>(
     reg_map: &RegMap<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
     let i64_type = llvm_ctx.i64_type();
+    let recv_val = reg_map.get(&recv).copied().unwrap_or(i64_type.const_int(0, false).into());
+    
+    // Handle string operations with dedicated runtime functions
+    match method {
+        "+" if args.len() == 1 => {
+            // String concatenation
+            let arg_val = reg_map.get(&args[0]).copied().unwrap_or(i64_type.const_int(0, false).into());
+            let fn_val = get_runtime_fn_value(module, "jdruby_str_concat").unwrap();
+            let val = builder.build_call(fn_val, &[recv_val.into(), arg_val.into()], "str_concat").unwrap();
+            return Ok(val.try_as_basic_value().unwrap_basic());
+        }
+        "to_s" if args.is_empty() => {
+            // Convert to string
+            let fn_val = get_runtime_fn_value(module, "jdruby_to_s").unwrap();
+            let val = builder.build_call(fn_val, &[recv_val.into()], "to_s").unwrap();
+            return Ok(val.try_as_basic_value().unwrap_basic());
+        }
+        _ => {}
+    }
+    
     let i8_type = llvm_ctx.i8_type();
     
     let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
-    let recv_val = reg_map.get(&recv).copied().unwrap_or(i64_type.const_int(0, false).into());
     
     // Create method name string with unique name
     let name_len = method.len();
