@@ -55,6 +55,13 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-21 llvm-21-dev clang-21
+          sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-21 100
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-21 100
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -101,16 +108,16 @@ jobs:
         run: |
           if [ "${{ inputs.build_profile }}" = "debug" ]; then
             echo "Building debug profile..."
-            cargo build --verbose
+            LLVM_SYS_211_PREFIX=/usr/lib/llvm-21 cargo build --verbose
           else
             echo "Building release profile with optimization level ${{ inputs.optimization_level }}..."
             # Set optimization level via environment variable
             export CARGO_PROFILE_RELEASE_OPT_LEVEL="${{ inputs.optimization_level }}"
-            cargo build --release --verbose
+            LLVM_SYS_211_PREFIX=/usr/lib/llvm-21 cargo build --release --verbose
           fi
 
       - name: Run Tests
-        run: cargo test --verbose
+        run: LLVM_SYS_211_PREFIX=/usr/lib/llvm-21 cargo test --verbose
         if: ${{ inputs.skip_tests == 'false' }}
 
       - name: Create release archive
