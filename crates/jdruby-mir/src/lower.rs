@@ -279,6 +279,465 @@ impl HirLowering {
                 self.emit(MirInst::LoadConst(reg, MirConst::Nil));
                 reg
             }
+
+            // =====================================================================
+            // METAPROGRAMMING NODE LOWERING
+            // =====================================================================
+
+            // Blocks and Closures
+            HirNode::BlockDef(block_def) => {
+                let captured_regs: Vec<RegId> = block_def.captured_vars.iter()
+                    .map(|name| {
+                        let reg = self.alloc_reg();
+                        self.emit(MirInst::Load(reg, name.clone()));
+                        reg
+                    })
+                    .collect();
+                let reg = self.alloc_reg();
+                let func_symbol = format!("block_{}_{}", self.current_blocks.len(), reg);
+                self.emit(MirInst::BlockCreate {
+                    dest: reg,
+                    func_symbol,
+                    captured_vars: captured_regs,
+                    is_lambda: block_def.is_lambda,
+                });
+                reg
+            }
+            HirNode::ProcDef(proc_def) => {
+                let captured_regs: Vec<RegId> = proc_def.captured_vars.iter()
+                    .map(|name| {
+                        let reg = self.alloc_reg();
+                        self.emit(MirInst::Load(reg, name.clone()));
+                        reg
+                    })
+                    .collect();
+                let block_reg = self.alloc_reg();
+                let func_symbol = format!("proc_{}_{}", self.current_blocks.len(), block_reg);
+                self.emit(MirInst::BlockCreate {
+                    dest: block_reg,
+                    func_symbol,
+                    captured_vars: captured_regs,
+                    is_lambda: false,
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ProcCreate { dest: reg, block_reg });
+                reg
+            }
+            HirNode::LambdaDef(lambda_def) => {
+                let captured_regs: Vec<RegId> = lambda_def.captured_vars.iter()
+                    .map(|name| {
+                        let reg = self.alloc_reg();
+                        self.emit(MirInst::Load(reg, name.clone()));
+                        reg
+                    })
+                    .collect();
+                let block_reg = self.alloc_reg();
+                let func_symbol = format!("lambda_{}_{}", self.current_blocks.len(), block_reg);
+                self.emit(MirInst::BlockCreate {
+                    dest: block_reg,
+                    func_symbol,
+                    captured_vars: captured_regs,
+                    is_lambda: true,
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::LambdaCreate { dest: reg, block_reg });
+                reg
+            }
+
+            // Module/Class Metaprogramming
+            HirNode::ModuleDef(mod_def) => {
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ModuleNew(reg, mod_def.name.clone()));
+                self.emit(MirInst::Store(mod_def.name.clone(), reg));
+                reg
+            }
+            HirNode::SingletonClass(singleton) => {
+                let obj_reg = self.lower_node(&singleton.receiver);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::SingletonClassGet(reg, obj_reg));
+                for node in &singleton.body {
+                    self.lower_node(node);
+                }
+                reg
+            }
+
+            // Dynamic Method Operations
+            HirNode::DefineMethod(def) => {
+                let class_reg = def.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let name_reg = self.lower_node(&def.name);
+                let reg = self.alloc_reg();
+                let method_func = format!("method_{}_{}", self.current_blocks.len(), reg);
+                let visibility = def.visibility.map(|v| self.convert_visibility(v))
+                    .unwrap_or(MirVisibility::Public);
+                self.emit(MirInst::DefineMethodDynamic {
+                    dest: reg,
+                    class_reg,
+                    name_reg,
+                    method_func,
+                    visibility,
+                });
+                reg
+            }
+            HirNode::UndefMethod(undef) => {
+                let class_reg = undef.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let name_reg = self.lower_node(&undef.name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::UndefMethod { dest: reg, class_reg, name_reg });
+                reg
+            }
+            HirNode::AliasMethod(alias) => {
+                let class_reg = alias.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let new_name_reg = self.lower_node(&alias.new_name);
+                let old_name_reg = self.lower_node(&alias.old_name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::AliasMethod { dest: reg, class_reg, new_name_reg, old_name_reg });
+                reg
+            }
+            HirNode::RemoveMethod(rem) => {
+                let class_reg = rem.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let name_reg = self.lower_node(&rem.name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::RemoveMethod { dest: reg, class_reg, name_reg });
+                reg
+            }
+            HirNode::VisibilitySet(vis) => {
+                let class_reg = vis.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let method_name_regs: Vec<RegId> = vis.method_names.iter()
+                    .map(|n| self.lower_node(n))
+                    .collect();
+                let reg = self.alloc_reg();
+                let visibility = self.convert_visibility(vis.visibility);
+                self.emit(MirInst::SetVisibility { dest: reg, class_reg, visibility, method_names: method_name_regs });
+                reg
+            }
+
+            // Dynamic Evaluation
+            HirNode::InstanceEval(eval) => {
+                let obj_reg = eval.receiver.as_ref()
+                    .map(|r| self.lower_node(r))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::Load(r, "self".to_string()));
+                        r
+                    });
+                let code_reg = match &eval.source {
+                    jdruby_hir::HirEvalSource::String(n) => self.lower_node(n),
+                    jdruby_hir::HirEvalSource::Block(_) => {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    }
+                };
+                let binding_reg = eval.binding.as_ref().map(|b| self.lower_node(b));
+                let reg = self.alloc_reg();
+                self.emit(MirInst::InstanceEval { dest: reg, obj_reg, code_reg, binding_reg });
+                reg
+            }
+            HirNode::ClassEval(eval) => {
+                let class_reg = eval.receiver.as_ref()
+                    .map(|r| self.lower_node(r))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let code_reg = match &eval.source {
+                    jdruby_hir::HirEvalSource::String(n) => self.lower_node(n),
+                    jdruby_hir::HirEvalSource::Block(_) => {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    }
+                };
+                let binding_reg = eval.binding.as_ref().map(|b| self.lower_node(b));
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ClassEval { dest: reg, class_reg, code_reg, binding_reg });
+                reg
+            }
+            HirNode::ModuleEval(eval) => {
+                let module_reg = eval.receiver.as_ref()
+                    .map(|r| self.lower_node(r))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let code_reg = match &eval.source {
+                    jdruby_hir::HirEvalSource::String(n) => self.lower_node(n),
+                    jdruby_hir::HirEvalSource::Block(_) => {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    }
+                };
+                let binding_reg = eval.binding.as_ref().map(|b| self.lower_node(b));
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ModuleEval { dest: reg, module_reg, code_reg, binding_reg });
+                reg
+            }
+            HirNode::Eval(eval) => {
+                let code_reg = match &eval.source {
+                    jdruby_hir::HirEvalSource::String(n) => self.lower_node(n),
+                    jdruby_hir::HirEvalSource::Block(_) => {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    }
+                };
+                let binding_reg = eval.binding.as_ref().map(|b| self.lower_node(b));
+                let filename_reg = eval.filename.as_ref().map(|f| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::String(f.clone())));
+                    r
+                });
+                let line_reg = eval.line.map(|l| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Integer(l as i64)));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::Eval { dest: reg, code_reg, binding_reg, filename_reg, line_reg });
+                reg
+            }
+            HirNode::BindingGet(_) => {
+                let reg = self.alloc_reg();
+                self.emit(MirInst::BindingGet { dest: reg });
+                reg
+            }
+
+            // Reflection
+            HirNode::Send(send) => {
+                let obj_reg = self.lower_node(&send.receiver);
+                let name_reg = self.lower_node(&send.method_name);
+                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
+                let block_reg = send.block.as_ref().map(|_| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::Send { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
+                reg
+            }
+            HirNode::PublicSend(send) => {
+                let obj_reg = self.lower_node(&send.receiver);
+                let name_reg = self.lower_node(&send.method_name);
+                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
+                let block_reg = send.block.as_ref().map(|_| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::PublicSend { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
+                reg
+            }
+            HirNode::InternalSend(send) => {
+                let obj_reg = self.lower_node(&send.receiver);
+                let name_reg = self.lower_node(&send.method_name);
+                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
+                let block_reg = send.block.as_ref().map(|_| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::Send { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
+                reg
+            }
+            HirNode::RespondTo(resp) => {
+                let obj_reg = self.lower_node(&resp.receiver);
+                let name_reg = self.lower_node(&resp.method_name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::RespondTo { dest: reg, obj_reg, name_reg, include_private: resp.include_private });
+                reg
+            }
+            HirNode::MethodObj(meth) => {
+                let obj_reg = self.lower_node(&meth.receiver);
+                let name_reg = self.lower_node(&meth.method_name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::MethodGet { dest: reg, obj_reg, name_reg });
+                reg
+            }
+            HirNode::InstanceMethod(meth) => {
+                let class_reg = self.lower_node(&meth.target_class);
+                let name_reg = self.lower_node(&meth.method_name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::InstanceMethodGet { dest: reg, class_reg, name_reg });
+                reg
+            }
+            HirNode::MethodCall(call) => {
+                let method_reg = self.lower_node(&call.method_obj);
+                let receiver_reg = call.receiver.as_ref().map(|r| self.lower_node(r));
+                let arg_regs: Vec<RegId> = call.args.iter().map(|a| self.lower_node(a)).collect();
+                let block_reg = call.block.as_ref().map(|_| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::MethodObjectCall { dest: reg, method_reg, receiver_reg, args: arg_regs, block_reg });
+                reg
+            }
+            HirNode::MethodBind(bind) => {
+                let method_reg = self.lower_node(&bind.method_obj);
+                let obj_reg = self.lower_node(&bind.receiver);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::MethodBind { dest: reg, method_reg, obj_reg });
+                reg
+            }
+
+            // Dynamic Variable Access
+            HirNode::IvarGetDynamic(ivar) => {
+                let obj_reg = self.lower_node(&ivar.target);
+                let name_reg = self.lower_node(&ivar.name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::IvarGetDynamic { dest: reg, obj_reg, name_reg });
+                reg
+            }
+            HirNode::IvarSetDynamic(ivar) => {
+                let obj_reg = self.lower_node(&ivar.target);
+                let name_reg = self.lower_node(&ivar.name);
+                let value_reg = ivar.value.as_ref().map(|v| self.lower_node(v)).unwrap_or_else(|| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                self.emit(MirInst::IvarSetDynamic { obj_reg, name_reg, value_reg });
+                value_reg
+            }
+            HirNode::CvarGetDynamic(cvar) => {
+                let class_reg = self.lower_node(&cvar.target);
+                let name_reg = self.lower_node(&cvar.name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::CvarGetDynamic { dest: reg, class_reg, name_reg });
+                reg
+            }
+            HirNode::CvarSetDynamic(cvar) => {
+                let class_reg = self.lower_node(&cvar.target);
+                let name_reg = self.lower_node(&cvar.name);
+                let value_reg = cvar.value.as_ref().map(|v| self.lower_node(v)).unwrap_or_else(|| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                self.emit(MirInst::CvarSetDynamic { class_reg, name_reg, value_reg });
+                value_reg
+            }
+            HirNode::ConstGetDynamic(cst) => {
+                let class_reg = self.lower_node(&cst.target_class);
+                let name_reg = self.lower_node(&cst.name);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ConstGetDynamic { dest: reg, class_reg, name_reg, inherit: cst.inherit });
+                reg
+            }
+            HirNode::ConstSetDynamic(cst) => {
+                let class_reg = self.lower_node(&cst.target_class);
+                let name_reg = self.lower_node(&cst.name);
+                let value_reg = cst.value.as_ref().map(|v| self.lower_node(v)).unwrap_or_else(|| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                self.emit(MirInst::ConstSetDynamic { class_reg, name_reg, value_reg });
+                value_reg
+            }
+
+            // Include/Extend/Prepend
+            HirNode::Include(inc) => {
+                let class_reg = inc.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let module_reg = self.lower_node(&inc.module);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::IncludeModule(class_reg, format!("module_{}", module_reg)));
+                reg
+            }
+            HirNode::Extend(ext) => {
+                let obj_reg = ext.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::Load(r, "self".to_string()));
+                        r
+                    });
+                let module_reg = self.lower_node(&ext.module);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::ExtendModule(obj_reg, format!("module_{}", module_reg)));
+                reg
+            }
+            HirNode::Prepend(pre) => {
+                let class_reg = pre.target_class.as_ref()
+                    .map(|t| self.lower_node(t))
+                    .unwrap_or_else(|| {
+                        let r = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                        r
+                    });
+                let module_reg = self.lower_node(&pre.module);
+                let reg = self.alloc_reg();
+                self.emit(MirInst::PrependModule(class_reg, format!("module_{}", module_reg)));
+                reg
+            }
+
+            // Method Missing
+            HirNode::MethodMissing(mm) => {
+                let obj_reg = self.lower_node(&mm.receiver);
+                let name_reg = self.alloc_reg();
+                self.emit(MirInst::LoadConst(name_reg, MirConst::Symbol(mm.method_name.clone())));
+                let arg_regs: Vec<RegId> = mm.args.iter().map(|a| self.lower_node(a)).collect();
+                let block_reg = mm.block.as_ref().map(|_| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
+                    r
+                });
+                let reg = self.alloc_reg();
+                self.emit(MirInst::MethodMissing { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
+                reg
+            }
+        }
+    }
+
+    fn convert_visibility(&self, vis: jdruby_hir::Visibility) -> MirVisibility {
+        match vis {
+            jdruby_hir::Visibility::Public => MirVisibility::Public,
+            jdruby_hir::Visibility::Protected => MirVisibility::Protected,
+            jdruby_hir::Visibility::Private => MirVisibility::Private,
+            jdruby_hir::Visibility::ModuleFunction => MirVisibility::ModuleFunction,
         }
     }
 

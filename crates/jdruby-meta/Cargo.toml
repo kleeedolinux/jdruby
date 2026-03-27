@@ -1,0 +1,13 @@
+[package]
+name = "jdruby-meta"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MetaObject Protocol (MOP) for JDRuby - MRI-compatible metaprogramming structures"
+
+[dependencies]
+jdruby-common = { workspace = true }
+
+[dev-dependencies]

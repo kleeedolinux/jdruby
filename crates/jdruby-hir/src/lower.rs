@@ -2,6 +2,156 @@ use jdruby_ast::*;
 use jdruby_common::SourceSpan;
 use crate::nodes::*;
 
+/// Factory for lowering blocks, procs, and lambdas from AST to HIR
+pub struct BlockLoweringFactory;
+
+impl BlockLoweringFactory {
+    /// Lower a block definition from AST BlockCall or lambda/proc expressions
+    pub fn lower_block_def(
+        &self,
+        params: &[Param],
+        body: &[Stmt],
+        is_lambda: bool,
+        span: SourceSpan,
+    ) -> HirBlockDef {
+        let hir_params = params.iter().map(|p| self.lower_param(p)).collect();
+        let (body_nodes, captured_vars) = self.lower_body_with_captures(body, params);
+        let captures_self = self.analyzes_self_capture(body);
+
+        HirBlockDef {
+            params: hir_params,
+            body: body_nodes,
+            is_lambda,
+            captures_self,
+            captured_vars,
+            span,
+        }
+    }
+
+    fn lower_param(&self, param: &Param) -> HirBlockParam {
+        HirBlockParam {
+            name: param.name.clone(),
+            default_value: param.default.as_ref().map(|e| AstLowering::lower_expr(e)),
+            splat: matches!(param.kind, ParamKind::Rest),
+            block: matches!(param.kind, ParamKind::Block),
+            span: param.span,
+        }
+    }
+
+    /// Lower body and analyze variable captures
+    fn lower_body_with_captures(
+        &self,
+        body: &[Stmt],
+        _params: &[Param],
+    ) -> (Vec<HirNode>, Vec<String>) {
+        let mut analyzer = CaptureAnalyzer::new();
+        analyzer.analyze_stmts(body);
+
+        let nodes: Vec<HirNode> = body.iter().filter_map(AstLowering::lower_stmt).collect();
+        (nodes, analyzer.captured_vars)
+    }
+
+    fn analyzes_self_capture(&self, _body: &[Stmt]) -> bool {
+        false // Simplified - would need full AST walk
+    }
+}
+
+/// Analyzer for finding captured variables from outer scope
+pub struct CaptureAnalyzer {
+    captured_vars: Vec<String>,
+    local_vars: std::collections::HashSet<String>,
+}
+
+impl CaptureAnalyzer {
+    pub fn new() -> Self {
+        Self {
+            captured_vars: Vec::new(),
+            local_vars: std::collections::HashSet::new(),
+        }
+    }
+
+    pub fn analyze_stmts(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.analyze_stmt(stmt);
+        }
+    }
+
+    fn analyze_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Expr(es) => self.analyze_expr(&es.expr),
+            Stmt::Assignment(a) => {
+                self.analyze_expr(&a.value);
+                if let AssignTarget::LocalVar(name) = &a.target {
+                    self.local_vars.insert(name.clone());
+                }
+            }
+            Stmt::CompoundAssignment(ca) => self.analyze_expr(&ca.value),
+            _ => {}
+        }
+    }
+
+    fn analyze_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::LocalVar(v) => {
+                if !self.local_vars.contains(&v.name) {
+                    self.captured_vars.push(v.name.clone());
+                }
+            }
+            Expr::BinaryOp(op) => {
+                self.analyze_expr(&op.left);
+                self.analyze_expr(&op.right);
+            }
+            Expr::MethodCall(c) => {
+                if let Some(recv) = &c.receiver {
+                    self.analyze_expr(recv);
+                }
+                for arg in &c.args {
+                    self.analyze_expr(arg);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Factory for lowering module and class definitions
+pub struct ModuleLoweringFactory;
+
+impl ModuleLoweringFactory {
+    /// Lower a module definition
+    pub fn lower_module_def(&self, def: &ModuleDef) -> HirModuleDef {
+        let body: Vec<HirNode> = def.body.iter().filter_map(AstLowering::lower_stmt).collect();
+        let nesting_path = vec![def.name.clone()];
+
+        HirModuleDef {
+            name: def.name.clone(),
+            body,
+            nesting_path,
+            span: def.span,
+        }
+    }
+
+    /// Lower a class definition (already exists but using factory pattern)
+    #[allow(dead_code)]
+    pub fn lower_class_def(&self, def: &ClassDef) -> HirClassDef {
+        let body: Vec<HirNode> = def.body.iter().filter_map(AstLowering::lower_stmt).collect();
+        let superclass = def.superclass.as_ref().and_then(|e| {
+            if let Expr::ConstRef(c) = e.as_ref() {
+                Some(c.path.join("::"))
+            } else {
+                None
+            }
+        });
+
+        HirClassDef {
+            name: def.name.clone(),
+            superclass,
+            body,
+            span: def.span,
+        }
+    }
+}
+
 /// Lowers an AST Program into HIR nodes.
 pub struct AstLowering;
 
@@ -54,10 +204,8 @@ impl AstLowering {
                 })))
             }
             Stmt::ModuleDef(def) => {
-                let body: Vec<HirNode> = def.body.iter().filter_map(Self::lower_stmt).collect();
-                Some(HirNode::ClassDef(Box::new(HirClassDef {
-                    name: def.name.clone(), superclass: None, body, span: def.span,
-                })))
+                let factory = ModuleLoweringFactory;
+                Some(HirNode::ModuleDef(Box::new(factory.lower_module_def(def))))
             }
             Stmt::If(s) => {
                 let cond = Self::lower_expr(&s.condition);
@@ -120,7 +268,7 @@ impl AstLowering {
                 let body: Vec<HirNode> = s.body.iter().filter_map(Self::lower_stmt).collect();
                 Some(HirNode::Call(Box::new(HirCall {
                     receiver: Some(iter), method: "each".into(), args: vec![],
-                    block: Some(HirBlock { params: vec![s.var.clone()], body }),
+                    block: Some(HirBlock { params: vec![HirBlockParam { name: s.var.clone(), default_value: None, splat: false, block: false, span: s.span }], body }),
                     span: s.span,
                 })))
             }
@@ -274,34 +422,48 @@ impl AstLowering {
                 args: call.args.iter().map(Self::lower_expr).collect(),
                 block: None, span: call.span,
             })),
-            Expr::BlockCall(bc) => HirNode::Call(Box::new(HirCall {
-                receiver: bc.call.receiver.as_ref().map(|r| Self::lower_expr(r)),
-                method: bc.call.method.clone(),
-                args: bc.call.args.iter().map(Self::lower_expr).collect(),
-                block: Some(HirBlock {
-                    params: bc.params.iter().map(|p| p.name.clone()).collect(),
-                    body: bc.body.iter().filter_map(Self::lower_stmt).collect(),
-                }),
-                span: bc.span,
-            })),
+            Expr::BlockCall(bc) => {
+                let factory = BlockLoweringFactory;
+                let block_def = factory.lower_block_def(&bc.params, &bc.body, false, bc.span);
+                HirNode::Call(Box::new(HirCall {
+                    receiver: bc.call.receiver.as_ref().map(|r| Self::lower_expr(r)),
+                    method: bc.call.method.clone(),
+                    args: bc.call.args.iter().map(Self::lower_expr).collect(),
+                    block: Some(HirBlock {
+                        params: block_def.params,
+                        body: block_def.body,
+                    }),
+                    span: bc.span,
+                }))
+            }
             Expr::SuperCall(s) => HirNode::Call(Box::new(HirCall {
                 receiver: None, method: "super".into(),
                 args: s.args.iter().map(Self::lower_expr).collect(),
                 block: None, span: s.span,
             })),
             Expr::YieldExpr(y) => HirNode::Yield(y.args.iter().map(Self::lower_expr).collect()),
-            Expr::Lambda(l) => HirNode::FuncDef(Box::new(HirFuncDef {
-                name: "<lambda>".into(),
-                params: l.params.iter().map(|p| p.name.clone()).collect(),
-                body: l.body.iter().filter_map(Self::lower_stmt).collect(),
-                is_class_method: false, span: l.span,
-            })),
-            Expr::Proc(p) => HirNode::FuncDef(Box::new(HirFuncDef {
-                name: "<proc>".into(),
-                params: p.params.iter().map(|pp| pp.name.clone()).collect(),
-                body: p.body.iter().filter_map(Self::lower_stmt).collect(),
-                is_class_method: false, span: p.span,
-            })),
+            Expr::Lambda(l) => {
+                let factory = BlockLoweringFactory;
+                let block_def = factory.lower_block_def(&l.params, &l.body, true, l.span);
+                HirNode::LambdaDef(Box::new(HirLambdaDef {
+                    params: block_def.params,
+                    body: block_def.body,
+                    captures_self: block_def.captures_self,
+                    captured_vars: block_def.captured_vars,
+                    span: l.span,
+                }))
+            }
+            Expr::Proc(p) => {
+                let factory = BlockLoweringFactory;
+                let block_def = factory.lower_block_def(&p.params, &p.body, false, p.span);
+                HirNode::ProcDef(Box::new(HirProcDef {
+                    params: block_def.params,
+                    body: block_def.body,
+                    captures_self: block_def.captures_self,
+                    captured_vars: block_def.captured_vars,
+                    span: p.span,
+                }))
+            },
             Expr::RangeLit(r) => HirNode::Call(Box::new(HirCall {
                 receiver: None, method: "Range.new".into(),
                 args: vec![Self::lower_expr(&r.start), Self::lower_expr(&r.end),

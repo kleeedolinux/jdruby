@@ -361,6 +361,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jdruby-meta"
+version = "0.1.0"
+dependencies = [
+ "jdruby-common",
+]
+
+[[package]]
 name = "jdruby-mir"
 version = "0.1.0"
 dependencies = [

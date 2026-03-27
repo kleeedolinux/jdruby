@@ -9,6 +9,7 @@ members = [
     "crates/jdruby-semantic",
     "crates/jdruby-hir",
     "crates/jdruby-mir",
+    "crates/jdruby-meta",
     "crates/jdruby-codegen",
     "crates/jdruby-runtime",
     "crates/jdruby-jit",
@@ -34,6 +35,7 @@ jdruby-parser = { path = "crates/jdruby-parser" }
 jdruby-semantic = { path = "crates/jdruby-semantic" }
 jdruby-hir = { path = "crates/jdruby-hir" }
 jdruby-mir = { path = "crates/jdruby-mir" }
+jdruby-meta = { path = "crates/jdruby-meta" }
 jdruby-codegen = { path = "crates/jdruby-codegen" }
 jdruby-runtime = { path = "crates/jdruby-runtime" }
 jdruby-jit = { path = "crates/jdruby-jit" }
