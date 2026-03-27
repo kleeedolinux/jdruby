@@ -95,11 +95,56 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     
     // Class/module
     RuntimeFn { name: "jdruby_class_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_module_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_singleton_class_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_def_method", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_prepend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_extend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_const_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_const_set", ret_type: RuntimeType::Void, param_types: &[RuntimeType::Ptr, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_ivar_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_ivar_set", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I64], variadic: false },
+    
+    // Block/closure operations
+    RuntimeFn { name: "jdruby_block_create", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_proc_create", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_lambda_create", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_block_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_current_block", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    
+    // Dynamic method operations
+    RuntimeFn { name: "jdruby_define_method_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: false },
+    RuntimeFn { name: "jdruby_undef_method", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_remove_method", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_alias_method", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_set_visibility", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I32, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
+    
+    // Dynamic evaluation
+    RuntimeFn { name: "jdruby_eval", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_instance_eval", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_class_eval", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_module_eval", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_binding_get", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    
+    // Reflection
+    RuntimeFn { name: "jdruby_send_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_public_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_respond_to", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I1], variadic: false },
+    RuntimeFn { name: "jdruby_method_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_instance_method_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_method_object_call", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_method_bind", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    
+    // Dynamic variable access
+    RuntimeFn { name: "jdruby_ivar_get_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_ivar_set_dynamic", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_cvar_get_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_cvar_set_dynamic", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_const_get_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I1], variadic: false },
+    RuntimeFn { name: "jdruby_const_set_dynamic", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
+    
+    // Method missing
+    RuntimeFn { name: "jdruby_method_missing", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr, RuntimeType::I64], variadic: false },
     
     // MRI C API compatibility (from jdruby-ffi/ruby_capi.rs)
     RuntimeFn { name: "rb_int_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },

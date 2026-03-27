@@ -355,6 +355,30 @@ impl<'ctx> JitCompiler<'ctx> {
         
         result
     }
+
+    /// Normalize IR text from typed pointers (i8*) to opaque pointers (ptr).
+    /// This is the reverse of denormalize_opaque_pointers.
+    fn normalize_opaque_pointers(ir_text: &str) -> String {
+        // Replace "i8*" with "ptr" in all contexts
+        let mut result = ir_text.to_string();
+        
+        // Replace "i8* " with "ptr " (space after)
+        result = result.replace("i8* ", "ptr ");
+        // Replace ", i8*" with ", ptr"
+        result = result.replace(", i8*", ", ptr");
+        // Replace "(i8*" with "(ptr"
+        result = result.replace("(i8*", "(ptr");
+        // Replace "*i8*" with "*ptr" (for nested pointers)
+        result = result.replace("*i8*", "*ptr");
+        // Replace "i8*," with "ptr," (i8* followed by comma)
+        result = result.replace("i8*,", "ptr,");
+        // Replace "i8*)" with "ptr)" (i8* followed by closing paren)
+        result = result.replace("i8*)", "ptr)");
+        // Replace " i8*\n" with " ptr\n" (i8* at end of line)
+        result = result.replace("i8*\n", "ptr\n");
+        
+        result
+    }
 }
 
 impl<'ctx> Default for JitCompiler<'ctx> {

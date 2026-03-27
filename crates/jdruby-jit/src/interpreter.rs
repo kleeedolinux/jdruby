@@ -290,6 +290,42 @@ impl MirInterpreter {
                 }
             }
             MirInst::Nop => {}
+
+            // Unimplemented MIR instructions - add as todo!() for now
+            MirInst::ModuleNew(_, _) => todo!("ModuleNew not yet implemented in interpreter"),
+            MirInst::SingletonClassGet(_, _) => todo!("SingletonClassGet not yet implemented in interpreter"),
+            MirInst::PrependModule(_, _) => todo!("PrependModule not yet implemented in interpreter"),
+            MirInst::ExtendModule(_, _) => todo!("ExtendModule not yet implemented in interpreter"),
+            MirInst::BlockCreate { .. } => todo!("BlockCreate not yet implemented in interpreter"),
+            MirInst::ProcCreate { .. } => todo!("ProcCreate not yet implemented in interpreter"),
+            MirInst::LambdaCreate { .. } => todo!("LambdaCreate not yet implemented in interpreter"),
+            MirInst::BlockYield { .. } => todo!("BlockYield not yet implemented in interpreter"),
+            MirInst::BlockGiven { .. } => todo!("BlockGiven not yet implemented in interpreter"),
+            MirInst::CurrentBlock { .. } => todo!("CurrentBlock not yet implemented in interpreter"),
+            MirInst::DefineMethodDynamic { .. } => todo!("DefineMethodDynamic not yet implemented in interpreter"),
+            MirInst::UndefMethod { .. } => todo!("UndefMethod not yet implemented in interpreter"),
+            MirInst::RemoveMethod { .. } => todo!("RemoveMethod not yet implemented in interpreter"),
+            MirInst::AliasMethod { .. } => todo!("AliasMethod not yet implemented in interpreter"),
+            MirInst::SetVisibility { .. } => todo!("SetVisibility not yet implemented in interpreter"),
+            MirInst::Eval { .. } => todo!("Eval not yet implemented in interpreter"),
+            MirInst::InstanceEval { .. } => todo!("InstanceEval not yet implemented in interpreter"),
+            MirInst::ClassEval { .. } => todo!("ClassEval not yet implemented in interpreter"),
+            MirInst::ModuleEval { .. } => todo!("ModuleEval not yet implemented in interpreter"),
+            MirInst::BindingGet { .. } => todo!("BindingGet not yet implemented in interpreter"),
+            MirInst::Send { .. } => todo!("Send not yet implemented in interpreter"),
+            MirInst::PublicSend { .. } => todo!("PublicSend not yet implemented in interpreter"),
+            MirInst::RespondTo { .. } => todo!("RespondTo not yet implemented in interpreter"),
+            MirInst::MethodGet { .. } => todo!("MethodGet not yet implemented in interpreter"),
+            MirInst::InstanceMethodGet { .. } => todo!("InstanceMethodGet not yet implemented in interpreter"),
+            MirInst::MethodObjectCall { .. } => todo!("MethodObjectCall not yet implemented in interpreter"),
+            MirInst::MethodBind { .. } => todo!("MethodBind not yet implemented in interpreter"),
+            MirInst::IvarGetDynamic { .. } => todo!("IvarGetDynamic not yet implemented in interpreter"),
+            MirInst::IvarSetDynamic { .. } => todo!("IvarSetDynamic not yet implemented in interpreter"),
+            MirInst::CvarGetDynamic { .. } => todo!("CvarGetDynamic not yet implemented in interpreter"),
+            MirInst::CvarSetDynamic { .. } => todo!("CvarSetDynamic not yet implemented in interpreter"),
+            MirInst::ConstGetDynamic { .. } => todo!("ConstGetDynamic not yet implemented in interpreter"),
+            MirInst::ConstSetDynamic { .. } => todo!("ConstSetDynamic not yet implemented in interpreter"),
+            MirInst::MethodMissing { .. } => todo!("MethodMissing not yet implemented in interpreter"),
         }
     }
 

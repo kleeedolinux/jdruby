@@ -12,10 +12,12 @@ use crate::storage::method_storage::with_method_storage;
 use crate::storage::ivar_storage::with_ivar_storage;
 use crate::storage::symbol_table::rb_intern_str;
 use crate::bridge::registry::init_bridge;
+use crate::bridge::allocator::init_allocator;
 
 /// Initialize the bridge (runtime entry point).
 #[no_mangle]
 pub extern "C" fn jdruby_init_bridge() {
+    init_allocator();
     init_bridge();
 }
 
@@ -386,4 +388,201 @@ pub extern "C" fn jdruby_block_given() -> bool {
 #[no_mangle]
 pub extern "C" fn jdruby_const_set(_name: *const c_char, _val: VALUE) {
     // TODO: Implement proper constant setting
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Additional MIR Runtime Functions
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Create a new module (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_module_new(_name: *const c_char) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Get singleton class (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_singleton_class_get(_obj: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Prepend module (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_prepend_module(_class: VALUE, _module_name: *const c_char) {
+}
+
+/// Extend module (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_extend_module(_obj: VALUE, _module_name: *const c_char) {
+}
+
+/// Create a block (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_block_create(_func_symbol: *const c_char, _argc: i32, _argv: *const VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Create a proc (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_proc_create(_block: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Create a lambda (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_lambda_create(_block: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Yield to block (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_block_yield(_block: VALUE, _argc: i32, _argv: *const VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Get current block (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_current_block() -> VALUE {
+    RUBY_QNIL
+}
+
+/// Define method dynamically (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_define_method_dynamic(_class: VALUE, _name: VALUE, _func: *const c_char, _visibility: i32) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Undefine method (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_undef_method(_class: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Remove method (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_remove_method(_class: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Alias method (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_alias_method(_class: VALUE, _new_name: VALUE, _old_name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Set method visibility (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_set_visibility(_class: VALUE, _visibility: i32, _argc: i32, _argv: *const VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Eval code (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_eval(_code: VALUE, _binding: VALUE, _filename: VALUE, _line: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Instance eval (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_instance_eval(_obj: VALUE, _code: VALUE, _binding: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Class eval (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_class_eval(_class: VALUE, _code: VALUE, _binding: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Module eval (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_module_eval(_module: VALUE, _code: VALUE, _binding: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Get binding (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_binding_get() -> VALUE {
+    RUBY_QNIL
+}
+
+/// Send method dynamically (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_send_dynamic(_obj: VALUE, _name: VALUE, _argc: i32, _argv: *const VALUE, _block: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Public send (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_public_send(_obj: VALUE, _name: VALUE, _argc: i32, _argv: *const VALUE, _block: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Respond to (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_respond_to(_obj: VALUE, _name: VALUE, _include_private: bool) -> VALUE {
+    RUBY_QFALSE
+}
+
+/// Get method object (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_method_get(_obj: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Get instance method (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_instance_method_get(_class: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Call method object (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_method_object_call(_method: VALUE, _receiver: VALUE, _argc: i32, _argv: *const VALUE, _block: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Bind method (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_method_bind(_method: VALUE, _obj: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Dynamic ivar get (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_ivar_get_dynamic(_obj: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Dynamic ivar set (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_ivar_set_dynamic(_obj: VALUE, _name: VALUE, _value: VALUE) {
+}
+
+/// Dynamic cvar get (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_cvar_get_dynamic(_class: VALUE, _name: VALUE) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Dynamic cvar set (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_cvar_set_dynamic(_class: VALUE, _name: VALUE, _value: VALUE) {
+}
+
+/// Dynamic const get (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_const_get_dynamic(_class: VALUE, _name: VALUE, _inherit: bool) -> VALUE {
+    RUBY_QNIL
+}
+
+/// Dynamic const set (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_const_set_dynamic(_class: VALUE, _name: VALUE, _value: VALUE) {
+}
+
+/// Method missing (placeholder).
+#[no_mangle]
+pub extern "C" fn jdruby_method_missing(_obj: VALUE, _name: VALUE, _argc: i32, _argv: *const VALUE, _block: VALUE) -> VALUE {
+    RUBY_QNIL
 }
