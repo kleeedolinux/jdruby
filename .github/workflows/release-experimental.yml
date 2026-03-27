@@ -41,6 +41,9 @@ on:
         default: true
         type: boolean
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
