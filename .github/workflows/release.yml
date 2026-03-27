@@ -1,0 +1,122 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: 'Build target'
+        required: true
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-release:
+    name: Build and Release for Linux
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate random version
+        id: version
+        run: |
+          # Generate random alphabet string (8 characters)
+          RANDOM_ALPHA=$(LC_ALL=C tr -dc 'a-z' < /dev/urandom | head -c 8)
+          
+          # List of random names for combination
+          NAMES=("cosmic" "stellar" "quantum" "nebula" "photon" "electron" "proton" "neutron" "atom" "molecule" "galaxy" "planet" "star" "comet" "asteroid" "meteor" "solar" "lunar" "orbital" "gravity")
+          
+          # Select 1-2 random names
+          NAME_COUNT=$((RANDOM % 2 + 1))
+          SELECTED_NAMES=()
+          for i in $(seq 1 $NAME_COUNT); do
+            INDEX=$((RANDOM % ${#NAMES[@]}))
+            SELECTED_NAMES+=("${NAMES[$INDEX]}")
+          done
+          
+          # Combine names with hyphen
+          NAME_PART=$(IFS=-; echo "${SELECTED_NAMES[*]}")
+          
+          # Final version: v(RANDOM)-(NAME)
+          VERSION="v${RANDOM_ALPHA}-${NAME_PART}"
+          
+          echo "Generated version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Format Check
+        run: cargo fmt -- --check
+
+      - name: Clippy Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build Release
+        run: cargo build --release --verbose
+
+      - name: Create release archive
+        run: |
+          mkdir -p release
+          cp target/release/jdruby release/ 2>/dev/null || echo "jdruby binary not found, looking for other binaries"
+          # Find any binary files in target/release
+          find target/release -type f -executable -not -path "*/examples/*" -not -name "*.d" -not -name "*.rlib" | head -10 | while read file; do
+            cp "$file" release/
+          done
+          tar -czf jdruby-${{ steps.version.outputs.version }}-linux.tar.gz -C release .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: JDRuby ${{ steps.version.outputs.version }}
+          body: |
+            ## Experimental Release: JDRuby ${{ steps.version.outputs.version }}
+            
+             **WARNING: This is an EXPERIMENTAL build for testing purposes only!**
+            
+            This release may contain:
+            - Unstable features
+            - Breaking changes
+            - Performance issues
+            - Incomplete functionality
+            
+            ### Use at your own risk!
+            
+            ### What's included
+            - Full native Ruby compiler and runtime implemented in Rust
+            - LLVM-based code generation
+            - Just-in-time compilation support
+            - Foreign function interface
+            
+            ### Installation (for testers only)
+            1. Download `jdruby-${{ steps.version.outputs.version }}-linux.tar.gz`
+            2. Extract: `tar -xzf jdruby-${{ steps.version.outputs.version }}-linux.tar.gz`
+            3. Run: `./jdruby your_script.rb`
+            
+            ### System Requirements
+            - Linux x86_64
+            - glibc 2.17 or later
+            
+            ---
+            **Experimental build from commit:** ${{ github.sha }}
+            **Status:** 🔬 Testing Only
+          files: |
+            jdruby-${{ steps.version.outputs.version }}-linux.tar.gz
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
