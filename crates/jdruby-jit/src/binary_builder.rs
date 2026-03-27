@@ -73,55 +73,17 @@ impl<'ctx> BinaryBuilder<'ctx> {
         };
 
         let mut codegen = CodeGenerator::new(codegen_config, self.context);
-        let (ir_text, reporter) = codegen.generate_with_errors(mir);
-
-        // Emit any codegen errors first
-        if reporter.has_errors() {
-            reporter.emit_to_cli();
-            return Err(reporter.into_error().unwrap_or_else(|| {
-                JDRubyError::Codegen { message: format!("Code generation failed for module {}", name) }
-            }));
-        }
-
-        // Parse the IR text into an inkwell module using MemoryBuffer
-        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            ir_text.as_bytes(),
-            name,
-        );
-
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|e| {
-                // Extract line number from error if possible
-                let err_str = e.to_string();
-                let line_num = err_str.split(':').nth(1)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(0);
-
-                // Get context around the error line
-                let context = if line_num > 0 {
-                    ir_text.lines()
-                        .skip(line_num.saturating_sub(3))
-                        .take(6)
-                        .enumerate()
-                        .map(|(i, line)| format!("{:4} | {}", line_num - 3 + i + 1, line))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    ir_text.lines().take(10).collect::<Vec<_>>().join("\n")
-                };
-
-                JDRubyError::llvm_ir(name.to_string(), err_str, context)
+        
+        // Use generate_module which returns Module directly, avoiding text IR parsing
+        let module = codegen.generate_module(mir)
+            .map_err(|diagnostics| {
+                let messages: Vec<String> = diagnostics.iter()
+                    .map(|d| d.message.clone())
+                    .collect();
+                JDRubyError::Codegen { 
+                    message: format!("Code generation failed for module {}: {}", name, messages.join(", "))
+                }
             })?;
-
-        if let Err(e) = module.verify() {
-            return Err(JDRubyError::llvm_ir(
-                name.to_string(),
-                format!("Module verification failed: {}", e.to_string()),
-                ir_text.lines().take(20).collect::<Vec<_>>().join("\n")
-            ));
-        }
 
         self.modules.insert(name.to_string(), module);
         Ok(())
@@ -162,12 +124,19 @@ impl<'ctx> BinaryBuilder<'ctx> {
     /// Link all modules into a single module.
     fn link_modules(&self) -> Result<Module<'ctx>, String> {
         let main_module = self.context.create_module("jdruby_main");
+        
+        eprintln!("DEBUG: Linking {} modules", self.modules.len());
 
         for (name, module) in &self.modules {
             main_module
                 .link_in_module(module.clone())
                 .map_err(|e| format!("Failed to link module {}: {}", name, e.to_string()))?;
         }
+        
+        // Re-emit runtime declarations after linking
+        jdruby_codegen::runtime::emit_runtime_decls(self.context, &main_module);
+        
+        eprintln!("DEBUG: Linked module created successfully");
 
         Ok(main_module)
     }

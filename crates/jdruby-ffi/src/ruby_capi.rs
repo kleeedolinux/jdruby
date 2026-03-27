@@ -26,6 +26,22 @@ pub static Qfalse: VALUE = RUBY_QFALSE;
 #[no_mangle]
 pub static Qundef: VALUE = RUBY_QUNDEF;
 
+// JDRuby-specific constants for LLVM IR
+#[no_mangle]
+pub static JDRUBY_NIL: VALUE = RUBY_QNIL;
+
+#[no_mangle]
+pub static JDRUBY_TRUE: VALUE = RUBY_QTRUE;
+
+#[no_mangle]
+pub static JDRUBY_FALSE: VALUE = RUBY_QFALSE;
+
+// Runtime initialization
+#[no_mangle]
+pub extern "C" fn jdruby_init_bridge() {
+    crate::bridge::init_bridge();
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Type Predicates
 // ═════════════════════════════════════════════════════════════════════════════
@@ -422,4 +438,201 @@ pub extern "C" fn jdruby_int_new(val: i64) -> VALUE { rb_int2fix(val) }
 #[no_mangle]
 pub extern "C" fn jdruby_float_new(val: f64) -> VALUE {
     bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Float(val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_str_new(ptr: *const c_char, len: i64) -> VALUE {
+    rb_str_new(ptr, len as c_long)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_sym_intern(name: *const c_char) -> VALUE {
+    rb_id2sym(rb_intern(name))
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_ary_new(_len: i32) -> VALUE {
+    // For now, create empty array - TODO: handle variadic args
+    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Array(Vec::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_hash_new(_len: i32) -> VALUE {
+    // For now, create empty hash - TODO: handle variadic args
+    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Hash(jdruby_runtime::value::RubyHash {
+        entries: Vec::new(),
+        default: None,
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_bool(val: bool) -> VALUE {
+    if val { RUBY_QTRUE } else { RUBY_QFALSE }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jdruby_send(recv: VALUE, method: *const c_char, _argc: i32) -> VALUE {
+    let _method_name = CStr::from_ptr(method).to_str().unwrap_or("unknown");
+    // For now, just return recv - TODO: implement proper method dispatch
+    recv
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_puts(val: VALUE) {
+    rb_io_puts(val);
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_truthy(val: VALUE) -> bool {
+    rb_test(val)
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_class_new(name: *const c_char, _superclass: VALUE) -> VALUE {
+    let _class_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Anonymous") };
+    // For now, return a placeholder - TODO: implement proper class creation
+    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Class(42)) // Placeholder class ID
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_def_method(_class: VALUE, name: *const c_char, func: *const c_char) {
+    // TODO: implement method definition
+    let _method_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("unknown") };
+    let _func_name = unsafe { CStr::from_ptr(func).to_str().unwrap_or("unknown") };
+    eprintln!("Defining method on class with function");
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_const_get(name: *const c_char) -> VALUE {
+    let _const_name = unsafe { CStr::from_ptr(name).to_str().unwrap_or("Object") };
+    // For now, return Object - TODO: implement proper constant lookup
+    bridge::jdruby_to_value(&jdruby_runtime::value::RubyValue::Class(42)) // Placeholder class ID
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_ivar_get(_obj: VALUE, _name: *const c_char) -> VALUE {
+    // TODO: implement instance variable access
+    RUBY_QNIL
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_ivar_set(_obj: VALUE, _name: *const c_char, _val: VALUE) {
+    // TODO: implement instance variable setting
+}
+
+// Arithmetic operations
+#[no_mangle]
+pub extern "C" fn jdruby_int_add(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_int2fix(rb_fix2long(a) + rb_fix2long(b))
+    } else {
+        RUBY_QNIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_int_sub(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_int2fix(rb_fix2long(a) - rb_fix2long(b))
+    } else {
+        RUBY_QNIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_int_mul(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_int2fix(rb_fix2long(a) * rb_fix2long(b))
+    } else {
+        RUBY_QNIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_int_div(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        let divisor = rb_fix2long(b);
+        if divisor != 0 {
+            rb_int2fix(rb_fix2long(a) / divisor)
+        } else {
+            RUBY_QNIL
+        }
+    } else {
+        RUBY_QNIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_int_mod(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        let divisor = rb_fix2long(b);
+        if divisor != 0 {
+            rb_int2fix(rb_fix2long(a) % divisor)
+        } else {
+            RUBY_QNIL
+        }
+    } else {
+        RUBY_QNIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_int_pow(a: VALUE, b: VALUE) -> VALUE {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        let base = rb_fix2long(a);
+        let exp = rb_fix2long(b);
+        if exp >= 0 && exp < 20 { // Prevent overflow
+            rb_int2fix(base.pow(exp as u32))
+        } else {
+            RUBY_QNIL
+        }
+    } else {
+        RUBY_QNIL
+    }
+}
+
+// Comparison operations
+#[no_mangle]
+pub extern "C" fn jdruby_eq(a: VALUE, b: VALUE) -> bool {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_fix2long(a) == rb_fix2long(b)
+    } else {
+        a == b
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_lt(a: VALUE, b: VALUE) -> bool {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_fix2long(a) < rb_fix2long(b)
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_gt(a: VALUE, b: VALUE) -> bool {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_fix2long(a) > rb_fix2long(b)
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_le(a: VALUE, b: VALUE) -> bool {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_fix2long(a) <= rb_fix2long(b)
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdruby_ge(a: VALUE, b: VALUE) -> bool {
+    if rb_fixnum_p(a) && rb_fixnum_p(b) {
+        rb_fix2long(a) >= rb_fix2long(b)
+    } else {
+        false
+    }
 }

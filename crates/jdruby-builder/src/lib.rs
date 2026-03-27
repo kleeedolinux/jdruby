@@ -157,8 +157,12 @@ impl BuildPipeline {
             match codegen.generate(&mir_module) {
                 Ok(ir) => {
                     // Write .ll file with the source file stem
+                    // Explicitly truncate to prevent trailing garbage from previous larger builds
                     let ll_path = PathBuf::from(format!("{}.ll", stem));
-                    if let Err(e) = std::fs::write(&ll_path, &ir) {
+                    let mut file = std::fs::File::create(&ll_path)
+                        .map_err(|e| JDRubyError::Io(std::io::Error::new(e.kind(), format!("{}: {}", ll_path.display(), e))))?;
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(ir.as_bytes()) {
                         eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
                     } else if self.config.verbose || self.config.emit_llvm_ir {
                         eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {} ({} bytes)", ll_path.display(), ir.len());

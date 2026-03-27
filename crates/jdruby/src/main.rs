@@ -98,6 +98,9 @@ enum Commands {
 }
 
 fn main() {
+    // Initialize the JDRuby FFI bridge before anything else
+    jdruby_ffi::bridge::init_bridge();
+    
     let cli = Cli::parse();
 
     let result = match cli.command {
@@ -366,6 +369,17 @@ fn cmd_build_jit(
         eprintln!("  Opt level: {}", opt_level);
     }
     
+    if verbose || emit_ll_v {
+        let func_names: Vec<String> = mir.functions.iter().map(|f| f.name.clone()).collect();
+        eprintln!("  MIR functions: {} ({})", mir.functions.len(), func_names.join(", "));
+    }
+    
+    // DEBUG: Print all functions in MIR
+    eprintln!("DEBUG: MIR has {} functions:", mir.functions.len());
+    for (i, func) in mir.functions.iter().enumerate() {
+        eprintln!("  {}: {} (params: {})", i, func.name, func.params.len());
+    }
+    
     // Build binary using inkwell
     let context = Context::create();
     let config = BinaryBuilderConfig {
@@ -381,41 +395,50 @@ fn cmd_build_jit(
     
     let mut builder = BinaryBuilder::new(&context, config);
     
-    // Add all MIR modules
-    for func in &mir.functions {
-        let mir_module = jdruby_mir::MirModule {
-            name: func.name.clone(),
-            functions: vec![func.clone()],
+    // Create a single MIR module containing all functions
+    let mir_module = jdruby_mir::MirModule {
+        name: "main".to_string(),
+        functions: mir.functions,
+    };
+    
+    // Emit IR before parsing if --emit-ll-v is set
+    if emit_ll_v {
+        use jdruby_codegen::{CodeGenerator, CodegenConfig, OutputFormat};
+        let codegen_config = CodegenConfig {
+            target_triple: "x86_64-unknown-linux-gnu".into(),
+            output_format: OutputFormat::LlvmIr,
+            ..Default::default()
         };
+        let llvm_context = Context::create();
+        let mut codegen = CodeGenerator::new(codegen_config, &llvm_context);
+        eprintln!("DEBUG: Generating full module with {} functions", mir_module.functions.len());
+        let (ir_text, reporter) = codegen.generate_with_errors(&mir_module);
         
-        // Emit IR before parsing if --emit-ll-v is set
-        if emit_ll_v {
-            use jdruby_codegen::{CodeGenerator, CodegenConfig, OutputFormat};
-            let codegen_config = CodegenConfig {
-                target_triple: "x86_64-unknown-linux-gnu".into(),
-                output_format: OutputFormat::LlvmIr,
-                ..Default::default()
-            };
-            let llvm_context = Context::create();
-            let mut codegen = CodeGenerator::new(codegen_config, &llvm_context);
-            let (ir_text, reporter) = codegen.generate_with_errors(&mir_module);
-            
-            // Always write IR file, even if there are errors
-            let ll_path = std::path::PathBuf::from(format!("{}.ll", func.name.replace('/', "_").replace('#', "_")));
-            if let Err(e) = std::fs::write(&ll_path, &ir_text) {
-                eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
-            } else {
-                eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {} ({} bytes)", ll_path.display(), ir_text.len());
+        // Always write IR file, even if there are errors
+        let ll_path = std::path::PathBuf::from("main.ll");
+        
+        // Explicitly truncate to prevent trailing garbage from previous larger builds
+        match std::fs::File::create(&ll_path) {
+            Ok(mut file) => {
+                use std::io::Write;
+                if let Err(e) = file.write_all(ir_text.as_bytes()) {
+                    eprintln!("\x1b[1;33mwarning\x1b[0m: could not write {}: {}", ll_path.display(), e);
+                } else {
+                    eprintln!("\x1b[1;32m✓\x1b[0m LLVM IR written to {} ({} bytes)", ll_path.display(), ir_text.len());
+                }
             }
-            
-            // Also report any codegen errors
-            if reporter.has_errors() {
-                reporter.emit_to_cli();
+            Err(e) => {
+                eprintln!("\x1b[1;33mwarning\x1b[0m: could not create {}: {}", ll_path.display(), e);
             }
         }
         
-        builder.add_module(&func.name, &mir_module)?;
+        // Also report any codegen errors
+        if reporter.has_errors() {
+            reporter.emit_to_cli();
+        }
     }
+    
+    builder.add_module("main", &mir_module)?;
     
     // Build the final binary
     let result = builder.build()?;

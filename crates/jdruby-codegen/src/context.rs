@@ -136,7 +136,7 @@ impl<'ctx> CodegenContext<'ctx> {
         let id = self.next_str_id;
         self.next_str_id += 1;
         let sanitized_module = crate::utils::sanitize_name(&self.module_name);
-        let name = format!(".str.{}. {}", sanitized_module, id);
+        let name = format!(".str.{}.{}", sanitized_module, id);
 
         // Create the string constant as a global
         let i8_type = ctx.i8_type();

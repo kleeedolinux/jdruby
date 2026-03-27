@@ -51,17 +51,20 @@ impl RuntimeType {
 /// All runtime functions available to generated code.
 /// These must match the `#[no_mangle]` extern "C" functions in jdruby-ffi.
 pub static RUNTIME_FNS: &[RuntimeFn] = &[
+    // Runtime initialization
+    RuntimeFn { name: "jdruby_init_bridge", ret_type: RuntimeType::Void, param_types: &[], variadic: false },
+    
     // Value constructors (from jdruby-ffi/ruby_capi.rs)
     RuntimeFn { name: "jdruby_int_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_float_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::F64], variadic: false },
     RuntimeFn { name: "jdruby_str_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_sym_intern", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
-    RuntimeFn { name: "jdruby_ary_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: true },
-    RuntimeFn { name: "jdruby_hash_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: true },
+    RuntimeFn { name: "jdruby_ary_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: false },
+    RuntimeFn { name: "jdruby_hash_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: false },
     RuntimeFn { name: "jdruby_bool", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I1], variadic: false },
     
     // Method dispatch
-    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: true },
+    RuntimeFn { name: "jdruby_send", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: false },
     RuntimeFn { name: "jdruby_call", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I32], variadic: true },
     RuntimeFn { name: "jdruby_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: true },
     RuntimeFn { name: "jdruby_block_given", ret_type: RuntimeType::I1, param_types: &[], variadic: false },
@@ -126,12 +129,13 @@ pub static RUNTIME_GLOBALS: &[(&str, RuntimeType)] = &[
 pub fn emit_runtime_decls<'ctx>(ctx: &'ctx Context, module: &Module<'ctx>) {
     let i64_type = ctx.i64_type();
     
-    // Emit global variables
+    // Emit global variables as ptr (opaque pointer)
     for (name, ty) in RUNTIME_GLOBALS {
-        let llvm_ty: inkwell::types::BasicTypeEnum<'ctx> = match ty {
+        let llvm_ty: BasicTypeEnum<'ctx> = match ty {
             RuntimeType::I64 => i64_type.into(),
             _ => i64_type.into(),
         };
+        // Add global with i64 type, but load/store will use ptr_type
         module.add_global(llvm_ty, None, name);
     }
     

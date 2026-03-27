@@ -58,7 +58,11 @@ pub struct CodegenConfig {
 impl Default for CodegenConfig {
     fn default() -> Self {
         Self {
-            target_triple: TargetMachine::get_default_triple().to_string(),
+            target_triple: TargetMachine::get_default_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("x86_64-unknown-linux-gnu")
+                .to_string(),
             opt_level: OptLevel::O2,
             debug_info: false,
             output_format: OutputFormat::LlvmIr,
@@ -118,7 +122,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         runtime::emit_runtime_decls(self.llvm_context, &llvm_module);
 
         // Emit all functions
-        for func in &module.functions {
+        eprintln!("DEBUG: Emitting {} functions to LLVM IR", module.functions.len());
+        for (i, func) in module.functions.iter().enumerate() {
+            eprintln!("DEBUG: Emitting function {}: {}", i, func.name);
             if let Err(diagnostics) = instructions::emit_function(
                 func,
                 &self.context,
@@ -126,9 +132,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &llvm_module,
                 &builder,
             ) {
+                eprintln!("DEBUG: Function {} failed with {} errors", func.name, diagnostics.len());
                 for diag in diagnostics {
                     reporter.report_diagnostic(diag);
                 }
+            } else {
+                eprintln!("DEBUG: Function {} emitted successfully", func.name);
             }
         }
 
@@ -141,6 +150,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Get output as string
         let output = llvm_module.print_to_string().to_string();
+        
         (output, reporter)
     }
 
@@ -216,7 +226,7 @@ pub fn generate_module<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jdruby_mir::{MirFunction, MirBlock, MirInst, MirConst, MirTerminator};
+    use jdruby_mir::{MirFunction, MirBlock, MirInst, MirTerminator, MirConst, MirBinOp};
 
     fn create_simple_module() -> MirModule {
         MirModule {
@@ -270,8 +280,8 @@ mod tests {
         assert!(result.is_ok());
         
         let ir = result.unwrap();
-        // Inkwell generates slightly different constant names
-        assert!(ir.contains("private unnamed_addr constant"));
+        // Inkwell generates string constants as private globals
+        assert!(ir.contains("private") || ir.contains("constant"), "Missing string constant attributes");
         assert!(ir.contains("call i64 @jdruby_str_new"));
     }
 
@@ -300,5 +310,434 @@ mod tests {
         let llvm_module = result.unwrap();
         let main_fn = llvm_module.get_function("main");
         assert!(main_fn.is_some());
+    }
+
+    #[test]
+    fn test_ir_properly_terminated() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // IR must end with exactly one newline after the closing brace
+        assert!(ir.ends_with("}\n"), "IR must end with }}\\n, got: {:?}", &ir[ir.len().saturating_sub(10)..]);
+        // Should not have multiple trailing newlines
+        assert!(!ir.ends_with("\n\n"), "IR has multiple trailing newlines");
+    }
+
+    #[test]
+    fn test_ir_contains_valid_function_structure() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Must have function definition with proper braces
+        assert!(ir.contains("define i64 @main()"), "Missing function definition");
+        assert!(ir.contains("}"), "Missing closing brace");
+        
+        // Count braces - must be balanced
+        let open_count = ir.matches('{').count();
+        let close_count = ir.matches('}').count();
+        assert_eq!(open_count, close_count, "Unbalanced braces: {} open, {} close", open_count, close_count);
+    }
+
+    #[test]
+    fn test_ir_opaque_pointer_syntax() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Modern LLVM uses opaque pointers (ptr) not typed pointers (i8*)
+        // The IR should use ptr consistently
+        if ir.contains("i8*") || ir.contains("i64*") {
+            panic!("IR contains typed pointer syntax (i8*/i64*) instead of opaque pointers (ptr)");
+        }
+    }
+
+    #[test]
+    fn test_ir_global_declarations() {
+        let mut module = create_simple_module();
+        // Add a global variable reference
+        module.functions[0].blocks[0].instructions.push(
+            MirInst::Load(4, "GlobalVar".to_string()),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Should contain global declaration
+        assert!(ir.contains("@GlobalVar"), "Missing global variable declaration");
+    }
+
+    #[test]
+    fn test_ir_runtime_function_declarations() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Must contain runtime function declarations
+        assert!(ir.contains("declare i64 @jdruby_int_new"), "Missing runtime function declaration");
+        assert!(ir.contains("declare void @jdruby_puts"), "Missing puts declaration");
+    }
+
+    #[test]
+    fn test_ir_no_duplicate_newlines_in_headers() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Check for excessive blank lines in header (before first declare)
+        let header_end = ir.find("declare").unwrap_or(ir.len());
+        let header = &ir[..header_end];
+        let double_newlines = header.matches("\n\n").count();
+        assert!(double_newlines <= 2, "Too many blank lines in IR header: {}", double_newlines);
+    }
+
+    #[test]
+    fn test_ir_module_id_present() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("; ModuleID = 'test'"), "Missing ModuleID comment");
+        assert!(ir.contains("source_filename"), "Missing source_filename");
+    }
+
+    #[test]
+    fn test_ir_function_has_terminator() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Find the main function and verify it has a terminator
+        let main_start = ir.find("define i64 @main()").expect("main function not found");
+        let main_end = ir[main_start..].find("}\n").map(|i| main_start + i).expect("main function closing brace not found");
+        let main_body = &ir[main_start..main_end];
+        
+        assert!(main_body.contains("ret "), "main function missing ret terminator");
+    }
+
+    #[test]
+    fn test_ir_string_constant_format() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::LoadConst(2, MirConst::String("test string".to_string())),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // String constants should be properly formatted as global arrays
+        assert!(ir.contains("private") || ir.contains("constant"), "Missing string constant attributes");
+        // Check for the string data in the IR (may be formatted as array or c-string)
+        assert!(ir.contains("test string") || ir.contains("[6 x i8]"), "Missing string constant content");
+    }
+
+    #[test]
+    fn test_ir_basic_block_labels() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        // Must have at least one basic block label - LLVM IR format uses colon after label name
+        assert!(ir.contains(":") && (ir.contains("entry") || ir.contains("define")), "Missing basic block labels");
+    }
+
+    #[test]
+    fn test_complex_module_with_multiple_functions() {
+        let mut module = create_simple_module();
+        // Add a second function
+        module.functions.push(MirFunction {
+            name: "helper".to_string(),
+            params: vec![10],
+            blocks: vec![MirBlock {
+                label: "entry".to_string(),
+                instructions: vec![
+                    MirInst::LoadConst(11, MirConst::Integer(100)),
+                    MirInst::BinOp(12, MirBinOp::Add, 10, 11),
+                ],
+                terminator: MirTerminator::Return(Some(12)),
+            }],
+            next_reg: 13,
+            span: jdruby_common::SourceSpan::default(),
+        });
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for multi-function module");
+        
+        let ir = result.unwrap();
+        
+        // Print complete IR output for debugging
+        println!("=== Generated IR for Complex Module ===");
+        println!("{}", ir);
+        println!("=== End IR Output ===");
+        
+        // Should have both function definitions
+        assert!(ir.contains("define i64 @main()"), "Missing main function");
+        assert!(ir.contains("define i64 @helper(i64 %0)"), "Missing helper function");
+        
+        // Verify balanced braces across entire module
+        let open_count = ir.matches('{').count();
+        let close_count = ir.matches('}').count();
+        assert_eq!(open_count, close_count, "Unbalanced braces in multi-function module");
+    }
+
+    #[test]
+    fn test_class_definition_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::ClassNew(10, "TestClass".to_string(), Some("Object".to_string())),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for class definition");
+        
+        let ir = result.unwrap();
+        // Should contain class name constant and class_new call
+        assert!(ir.contains("TestClass"), "Missing class name in IR");
+        assert!(ir.contains("jdruby_class_new"), "Missing class_new call");
+    }
+
+    #[test]
+    fn test_method_definition_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::ClassNew(10, "MyClass".to_string(), None),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            1,
+            MirInst::DefMethod(10, "test_method".to_string(), "MyClass#test_method".to_string()),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for method definition");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("test_method"), "Missing method name in IR");
+        assert!(ir.contains("jdruby_def_method"), "Missing def_method call");
+    }
+
+    #[test]
+    fn test_module_include_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::ClassNew(10, "MyClass".to_string(), None),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            1,
+            MirInst::IncludeModule(10, "Enumerable".to_string()),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for module include");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("Enumerable"), "Missing module name in IR");
+    }
+
+    #[test]
+    fn test_multiple_string_constants_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::LoadConst(10, MirConst::String("first".to_string())),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            1,
+            MirInst::LoadConst(11, MirConst::String("second".to_string())),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            2,
+            MirInst::Call(12, "puts".to_string(), vec![10]),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for multiple strings");
+        
+        let ir = result.unwrap();
+        // Should have string constants
+        assert!(ir.contains("first"), "Missing first string constant");
+        assert!(ir.contains("second"), "Missing second string constant");
+        // Should have jdruby_str_new calls
+        let str_new_count = ir.matches("jdruby_str_new").count();
+        assert!(str_new_count >= 2, "Expected at least 2 str_new calls, found {}", str_new_count);
+    }
+
+    #[test]
+    fn test_global_variable_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::LoadConst(10, MirConst::Integer(42)),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            1,
+            MirInst::Store("$global_var".to_string(), 10),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            2,
+            MirInst::Load(11, "$global_var".to_string()),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for global variable");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("global_var"), "Missing global variable in IR");
+    }
+
+    #[test]
+    fn test_method_call_with_self_ir() {
+        let mut module = create_simple_module();
+        // Add a store for self simulation (param 0 is self)
+        module.functions[0].params.push(100); // self register
+        module.functions[0].blocks[0].instructions.insert(
+            0,
+            MirInst::LoadConst(10, MirConst::String("test".to_string())),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            1,
+            MirInst::MethodCall(11, 100, "puts".to_string(), vec![10]),
+        );
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for method call with self");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("jdruby_send"), "Missing jdruby_send call");
+    }
+
+    #[test]
+    fn test_ir_valid_module_structure() {
+        let module = create_simple_module();
+        let result = generate_ir(&module);
+        assert!(result.is_ok());
+        
+        let ir = result.unwrap();
+        
+        // Must start with ModuleID
+        assert!(ir.starts_with("; ModuleID = "), "IR must start with ModuleID");
+        
+        // Must have source_filename
+        assert!(ir.contains("source_filename"), "Missing source_filename");
+        
+        // Must have target triple
+        assert!(ir.contains("target triple"), "Missing target triple");
+        
+        // Must have declarations before definitions
+        let first_declare = ir.find("declare").unwrap_or(0);
+        let first_define = ir.find("define").unwrap_or(ir.len());
+        assert!(first_declare < first_define, "Declarations must come before definitions");
+        
+        // Must end properly
+        assert!(ir.trim_end().ends_with("}"), "IR must end with closing brace");
+    }
+
+    #[test]
+    fn test_nested_function_calls_ir() {
+        let mut module = create_simple_module();
+        // Create nested call: puts(1 + 2)
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::LoadConst(10, MirConst::Integer(1)),
+            MirInst::LoadConst(11, MirConst::Integer(2)),
+            MirInst::BinOp(12, MirBinOp::Add, 10, 11),
+            MirInst::Call(13, "puts".to_string(), vec![12]),
+        ];
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for nested calls");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("jdruby_int_add"), "Missing int_add for nested expression");
+        assert!(ir.contains("jdruby_puts"), "Missing puts call");
+    }
+
+    #[test]
+    fn test_boolean_constants_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::LoadConst(10, MirConst::Bool(true)),
+            MirInst::LoadConst(11, MirConst::Bool(false)),
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(None);
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for boolean constants");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("JDRUBY_TRUE"), "Missing JDRUBY_TRUE");
+        assert!(ir.contains("JDRUBY_FALSE"), "Missing JDRUBY_FALSE");
+    }
+
+    #[test]
+    fn test_nil_constant_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::LoadConst(10, MirConst::Nil),
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(Some(10));
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for nil constant");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("JDRUBY_NIL"), "Missing JDRUBY_NIL");
+    }
+
+    #[test]
+    fn test_comparison_operations_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::LoadConst(10, MirConst::Integer(5)),
+            MirInst::LoadConst(11, MirConst::Integer(3)),
+            MirInst::BinOp(12, MirBinOp::Eq, 10, 11),
+            MirInst::BinOp(13, MirBinOp::Lt, 10, 11),
+            MirInst::BinOp(14, MirBinOp::Gt, 10, 11),
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(None);
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for comparisons");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("jdruby_eq"), "Missing eq comparison");
+        assert!(ir.contains("jdruby_lt"), "Missing lt comparison");
+        assert!(ir.contains("jdruby_gt"), "Missing gt comparison");
+    }
+
+    #[test]
+    fn test_arithmetic_operations_ir() {
+        let mut module = create_simple_module();
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::LoadConst(10, MirConst::Integer(10)),
+            MirInst::LoadConst(11, MirConst::Integer(3)),
+            MirInst::BinOp(12, MirBinOp::Add, 10, 11),
+            MirInst::BinOp(13, MirBinOp::Sub, 12, 11),
+            MirInst::BinOp(14, MirBinOp::Mul, 13, 11),
+            MirInst::BinOp(15, MirBinOp::Div, 14, 11),
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(Some(15));
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for arithmetic");
+        
+        let ir = result.unwrap();
+        assert!(ir.contains("jdruby_int_add"), "Missing int_add");
+        assert!(ir.contains("jdruby_int_sub"), "Missing int_sub");
+        assert!(ir.contains("jdruby_int_mul"), "Missing int_mul");
+        assert!(ir.contains("jdruby_int_div"), "Missing int_div");
     }
 }

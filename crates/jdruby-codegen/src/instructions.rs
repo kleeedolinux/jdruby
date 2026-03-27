@@ -11,6 +11,10 @@ use crate::context::CodegenContext;
 use crate::runtime::get_runtime_fn_value;
 use crate::utils::sanitize_name;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Single global counter for all unique global names
+static GLOBAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register mapping for function-local values.
 type RegMap<'ctx> = HashMap<u32, BasicValueEnum<'ctx>>;
@@ -30,9 +34,29 @@ pub fn emit_function<'ctx>(
     let fn_name = sanitize_name(&func.name);
     let function = module.add_function(&fn_name, fn_type, None);
     
-    // Create entry basic block
-    let entry = llvm_ctx.append_basic_block(function, "entry");
-    builder.position_at_end(entry);
+    // Create all basic blocks first
+    let mut blocks: HashMap<String, BasicBlock<'ctx>> = HashMap::new();
+    for block in &func.blocks {
+        let bb = llvm_ctx.append_basic_block(function, &block.label);
+        blocks.insert(block.label.clone(), bb);
+    }
+    
+    // Get the entry block (first block from MIR)
+    let entry_bb = func.blocks.first()
+        .and_then(|b| blocks.get(&b.label))
+        .copied()
+        .unwrap_or_else(|| llvm_ctx.append_basic_block(function, "entry"));
+    
+    // Position at entry block to emit allocas
+    builder.position_at_end(entry_bb);
+    
+    // Add bridge initialization at the start of main function
+    if func.name == "main" {
+        let init_fn = module.get_function("jdruby_init_bridge");
+        if let Some(init_fn) = init_fn {
+            builder.build_call(init_fn, &[], "init").unwrap();
+        }
+    }
     
     // Map params to registers
     let mut reg_map: RegMap = HashMap::new();
@@ -44,7 +68,7 @@ pub fn emit_function<'ctx>(
     // Collect all locals that need allocas
     let locals = collect_locals(func);
     
-    // Create allocas for locals
+    // Create allocas for locals in the entry block
     let mut local_allocs: HashMap<String, PointerValue<'ctx>> = HashMap::new();
     for local in &locals {
         let alloca = builder.build_alloca(i64_type, &format!("local_{}", sanitize_name(local))).unwrap();
@@ -59,23 +83,27 @@ pub fn emit_function<'ctx>(
         }
     }
     
-    // Create all basic blocks first
-    let mut blocks: HashMap<String, BasicBlock<'ctx>> = HashMap::new();
-    for block in &func.blocks {
-        let bb = llvm_ctx.append_basic_block(function, &block.label);
-        blocks.insert(block.label.clone(), bb);
-    }
-    
-    // Branch to first block
-    if let Some(first_block) = func.blocks.first() {
-        let target = blocks.get(&first_block.label).unwrap();
-        builder.build_unconditional_branch(*target).unwrap();
+    // If there's more than one block, branch from entry to the first code block
+    // Note: if entry_bb IS the first code block, we don't need a branch
+    if func.blocks.len() > 1 {
+        if let Some(first_block) = func.blocks.first() {
+            if let Some(&target) = blocks.get(&first_block.label) {
+                if target != entry_bb {
+                    builder.build_unconditional_branch(target).unwrap();
+                }
+            }
+        }
     }
     
     // Emit each block
     for block in &func.blocks {
         let bb = *blocks.get(&block.label).unwrap();
-        builder.position_at_end(bb);
+        
+        // For single-block functions, we're already positioned after allocas
+        // For multi-block functions, position at each block
+        if func.blocks.len() > 1 || bb != entry_bb {
+            builder.position_at_end(bb);
+        }
         
         emit_block(block, ctx, llvm_ctx, module, builder, &mut reg_map, &local_allocs, &blocks)?;
     }
@@ -160,7 +188,7 @@ fn emit_instruction<'ctx>(
             reg_map.insert(*dest, val);
         }
         MirInst::Load(reg, name) => {
-            let val = emit_load(name, ctx, llvm_ctx, module, builder, reg_map, local_allocs)?;
+            let val = emit_load(name, *reg, ctx, llvm_ctx, module, builder, reg_map, local_allocs)?;
             reg_map.insert(*reg, val);
         }
         MirInst::Store(name, reg) => {
@@ -226,13 +254,16 @@ fn emit_load_const<'ctx>(
             Ok(loaded)
         }
         MirConst::String(s) => {
-            // Get or create string constant
+            // Get or create string constant with unique name
             let byte_len = s.len();
             let i8_type = llvm_ctx.i8_type();
             let array_type = i8_type.array_type((byte_len + 1) as u32);
-            let global = module.add_global(array_type, None, "str_const");
+            let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let global_name = format!("str_const_{}_{}", s.len(), counter);
+            let global = module.add_global(array_type, None, &global_name);
             global.set_linkage(inkwell::module::Linkage::Private);
             global.set_unnamed_addr(true);
+            global.set_alignment(1);
             
             // Create string bytes with null terminator
             let mut bytes: Vec<_> = s.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
@@ -252,11 +283,12 @@ fn emit_load_const<'ctx>(
             Ok(val.try_as_basic_value().unwrap_basic())
         }
         MirConst::Symbol(s) => {
-            // Similar to string but for symbols
+            // Similar to string but for symbols with unique name
             let byte_len = s.len();
             let i8_type = llvm_ctx.i8_type();
             let array_type = i8_type.array_type((byte_len + 1) as u32);
-            let global = module.add_global(array_type, None, "sym_const");
+            let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let global = module.add_global(array_type, None, &format!("sym_const_{}", counter));
             global.set_linkage(inkwell::module::Linkage::Private);
             global.set_unnamed_addr(true);
             
@@ -523,11 +555,12 @@ fn emit_call<'ctx>(
             let self_alloca = local_allocs.get("self").copied().unwrap();
             let self_val = builder.build_load(i64_type, self_alloca, "self").unwrap();
             
-            // Create method name string
+            // Create method name string with unique name
             let i8_type = llvm_ctx.i8_type();
             let name_len = name.len();
             let array_type = i8_type.array_type((name_len + 1) as u32);
-            let global = module.add_global(array_type, None, "meth_name");
+            let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let global = module.add_global(array_type, None, &format!("meth_call_{}", counter));
             global.set_linkage(inkwell::module::Linkage::Private);
             let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
             bytes.push(i8_type.const_int(0, false));
@@ -566,10 +599,11 @@ fn emit_method_call<'ctx>(
     let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
     let recv_val = reg_map.get(&recv).copied().unwrap_or(i64_type.const_int(0, false).into());
     
-    // Create method name string
+    // Create method name string with unique name
     let name_len = method.len();
     let array_type = i8_type.array_type((name_len + 1) as u32);
-    let global = module.add_global(array_type, None, "meth_name");
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let global = module.add_global(array_type, None, &format!("meth_call_{}", counter));
     global.set_linkage(inkwell::module::Linkage::Private);
     let mut bytes: Vec<_> = method.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     bytes.push(i8_type.const_int(0, false));
@@ -592,6 +626,7 @@ fn emit_method_call<'ctx>(
 
 fn emit_load<'ctx>(
     name: &str,
+    _reg: u32,
     _ctx: &CodegenContext<'ctx>,
     llvm_ctx: &'ctx Context,
     module: &Module<'ctx>,
@@ -603,22 +638,15 @@ fn emit_load<'ctx>(
     let i8_type = llvm_ctx.i8_type();
     
     if name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with('$') {
-        // Constant/global lookup
-        let name_len = name.len();
-        let array_type = i8_type.array_type((name_len + 1) as u32);
-        let global = module.add_global(array_type, None, "const_name");
-        global.set_linkage(inkwell::module::Linkage::Private);
-        let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
-        bytes.push(i8_type.const_int(0, false));
-        global.set_initializer(&i8_type.const_array(&bytes));
-        
-        let ptr = global.as_pointer_value();
-        let zero = llvm_ctx.i64_type().const_int(0, false);
-        let const_ptr = unsafe { builder.build_gep(i8_type, ptr, &[zero, zero], "const_ptr").unwrap() };
-        
-        let fn_val = get_runtime_fn_value(module, "jdruby_const_get").unwrap();
-        let val = builder.build_call(fn_val, &[const_ptr.into()], "const_get").unwrap();
-        Ok(val.try_as_basic_value().unwrap_basic())
+        // Global variable load - create/get the actual global and load from it
+        let global_name = sanitize_name(name);
+        let global = module.get_global(&global_name).unwrap_or_else(|| {
+            let g = module.add_global(i64_type, None, &global_name);
+            g.set_initializer(&i64_type.const_int(0, false));
+            g
+        });
+        let val = builder.build_load(i64_type, global.as_pointer_value(), &format!("load_{}", global_name)).unwrap();
+        Ok(val)
     } else if name.starts_with('@') {
         // Instance variable
         let self_alloca = local_allocs.get("self").copied().unwrap();
@@ -626,7 +654,8 @@ fn emit_load<'ctx>(
         
         let name_len = name.len();
         let array_type = i8_type.array_type((name_len + 1) as u32);
-        let global = module.add_global(array_type, None, "ivar_name");
+        let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let global = module.add_global(array_type, None, &format!("ivar_name_{}", counter));
         global.set_linkage(inkwell::module::Linkage::Private);
         let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
         bytes.push(i8_type.const_int(0, false));
@@ -677,7 +706,8 @@ fn emit_store<'ctx>(
         
         let name_len = name.len();
         let array_type = i8_type.array_type((name_len + 1) as u32);
-        let global = module.add_global(array_type, None, "ivar_name");
+        let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let global = module.add_global(array_type, None, &format!("ivar_name_{}", counter));
         global.set_linkage(inkwell::module::Linkage::Private);
         let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
         bytes.push(i8_type.const_int(0, false));
@@ -709,10 +739,11 @@ fn emit_class_new<'ctx>(
     let i64_type = llvm_ctx.i64_type();
     let i8_type = llvm_ctx.i8_type();
     
-    // Class name
+    // Class name with unique suffix
     let name_len = name.len();
     let array_type = i8_type.array_type((name_len + 1) as u32);
-    let global = module.add_global(array_type, None, "class_name");
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let global = module.add_global(array_type, None, &format!("class_name_{}", counter));
     global.set_linkage(inkwell::module::Linkage::Private);
     let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     bytes.push(i8_type.const_int(0, false));
@@ -726,7 +757,8 @@ fn emit_class_new<'ctx>(
     let sc_val = if let Some(sc) = superclass {
         let sc_len = sc.len();
         let sc_array_type = i8_type.array_type((sc_len + 1) as u32);
-        let sc_global = module.add_global(sc_array_type, None, "sc_name");
+        let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let sc_global = module.add_global(sc_array_type, None, &format!("sc_name_{}", counter));
         sc_global.set_linkage(inkwell::module::Linkage::Private);
         let mut sc_bytes: Vec<_> = sc.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
         sc_bytes.push(i8_type.const_int(0, false));
@@ -763,10 +795,11 @@ fn emit_def_method<'ctx>(
     
     let class_val = reg_map.get(&class_reg).copied().unwrap_or(i64_type.const_int(0, false).into());
     
-    // Method name
+    // Method name with unique suffix
     let meth_len = method_name.len();
     let meth_array_type = i8_type.array_type((meth_len + 1) as u32);
-    let meth_global = module.add_global(meth_array_type, None, "def_meth_name");
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let meth_global = module.add_global(meth_array_type, None, &format!("def_meth_name_{}", counter));
     meth_global.set_linkage(inkwell::module::Linkage::Private);
     let mut meth_bytes: Vec<_> = method_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     meth_bytes.push(i8_type.const_int(0, false));
@@ -776,12 +809,14 @@ fn emit_def_method<'ctx>(
     let zero = llvm_ctx.i64_type().const_int(0, false);
     let meth_name_ptr = unsafe { builder.build_gep(i8_type, meth_ptr, &[zero, zero], "meth_name_ptr").unwrap() };
     
-    // Function name
-    let func_len = func_name.len();
+    // Function name with unique suffix - sanitize the function name for LLVM
+    let sanitized_func_name = sanitize_name(func_name);
+    let func_len = sanitized_func_name.len();
     let func_array_type = i8_type.array_type((func_len + 1) as u32);
-    let func_global = module.add_global(func_array_type, None, "def_func_name");
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let func_global = module.add_global(func_array_type, None, &format!("def_func_name_{}", counter));
     func_global.set_linkage(inkwell::module::Linkage::Private);
-    let mut func_bytes: Vec<_> = func_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
+    let mut func_bytes: Vec<_> = sanitized_func_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     func_bytes.push(i8_type.const_int(0, false));
     func_global.set_initializer(&i8_type.const_array(&func_bytes));
     
@@ -808,10 +843,11 @@ fn emit_include_module<'ctx>(
     
     let class_val = reg_map.get(&class_reg).copied().unwrap_or(i64_type.const_int(0, false).into());
     
-    // Module name
+    // Module name with unique suffix
     let mod_len = module_name.len();
     let mod_array_type = i8_type.array_type((mod_len + 1) as u32);
-    let mod_global = module.add_global(mod_array_type, None, "inc_mod_name");
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mod_global = module.add_global(mod_array_type, None, &format!("inc_mod_name_{}", counter));
     mod_global.set_linkage(inkwell::module::Linkage::Private);
     let mut mod_bytes: Vec<_> = module_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     mod_bytes.push(i8_type.const_int(0, false));
@@ -829,7 +865,7 @@ fn emit_include_module<'ctx>(
     let incl_name = "include";
     let incl_len = incl_name.len();
     let incl_array_type = i8_type.array_type((incl_len + 1) as u32);
-    let incl_global = module.add_global(incl_array_type, None, "inc_name");
+    let incl_global = module.add_global(incl_array_type, None, &format!("inc_name_{}", reg_map.len()));
     incl_global.set_linkage(inkwell::module::Linkage::Private);
     let mut incl_bytes: Vec<_> = incl_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
     incl_bytes.push(i8_type.const_int(0, false));

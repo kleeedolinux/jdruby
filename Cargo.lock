@@ -273,6 +273,7 @@ dependencies = [
  "jdruby-builder",
  "jdruby-codegen",
  "jdruby-common",
+ "jdruby-ffi",
  "jdruby-hir",
  "jdruby-jit",
  "jdruby-lexer",
@@ -291,6 +292,7 @@ dependencies = [
 name = "jdruby-builder"
 version = "0.1.0"
 dependencies = [
+ "inkwell",
  "jdruby-codegen",
  "jdruby-common",
  "jdruby-hir",
@@ -306,6 +308,7 @@ dependencies = [
 name = "jdruby-codegen"
 version = "0.1.0"
 dependencies = [
+ "inkwell",
  "jdruby-common",
  "jdruby-ffi",
  "jdruby-mir",

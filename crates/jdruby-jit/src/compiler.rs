@@ -13,6 +13,7 @@ use inkwell::targets::{InitializationConfig, Target};
 use inkwell::OptimizationLevel as InkwellOptLevel;
 use inkwell::values::FunctionValue;
 use jdruby_codegen::{CodeGenerator, CodegenConfig, OptLevel};
+use jdruby_codegen::utils::sanitize_name;
 use jdruby_mir::{MirFunction, MirModule};
 
 use crate::optimizer::{JitOptimizer, InlineCacheRegistry};
@@ -182,7 +183,7 @@ impl<'ctx> JitCompiler<'ctx> {
         };
 
         let module = MirModule {
-            name: format!("jit_{}", func.name),
+            name: format!("jit_{}", sanitize_name(&func.name)),
             functions: vec![func.clone()],
         };
 
@@ -204,9 +205,16 @@ impl<'ctx> JitCompiler<'ctx> {
         tier: CompilationTier,
         invocation_count: u64,
     ) -> Result<&CompiledFunction<'ctx>, String> {
+        // Convert opaque pointers (ptr) to typed pointers (i8*) for LLVM compatibility
+        let normalized_ir = Self::denormalize_opaque_pointers(ir_text);
+        
         // Parse LLVM IR text into a module using MemoryBuffer
+        // LLVM 21.1 requires proper null termination for MemoryBuffer
+        let mut ir_bytes = normalized_ir.as_bytes().to_vec();
+        ir_bytes.push(0); // Add null terminator
+        
         let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            ir_text.as_bytes(),
+            &ir_bytes,
             name,
         );
         
@@ -245,10 +253,11 @@ impl<'ctx> JitCompiler<'ctx> {
         // Map runtime functions for FFI calls
         self.link_runtime_functions(&ee)?;
 
-        // Get the function from the module
+        // Get the function from the module using sanitized name
+        let sanitized_name = sanitize_name(name);
         let function = module
-            .get_function(name)
-            .ok_or_else(|| format!("Function {} not found in module", name))?;
+            .get_function(&sanitized_name)
+            .ok_or_else(|| format!("Function {} (sanitized: {}) not found in module", name, sanitized_name))?;
 
         // Prepare inline caches for method calls
         let cache_slots = self.optimizer.prepare_inline_caches(&module, function, 8);
@@ -322,6 +331,30 @@ impl<'ctx> JitCompiler<'ctx> {
     pub fn invalidate(&mut self, name: &str) {
         self.compiled.remove(name);
     }
+
+    /// Denormalize IR text from opaque pointers (ptr) to typed pointers (i8*).
+    /// This is needed for LLVM versions that don't support opaque pointers natively.
+    fn denormalize_opaque_pointers(ir_text: &str) -> String {
+        // Replace "ptr" with "i8*" in all contexts
+        let mut result = ir_text.to_string();
+        
+        // Replace "ptr " with "i8* " (space after)
+        result = result.replace("ptr ", "i8* ");
+        // Replace ", ptr" with ", i8*"
+        result = result.replace(", ptr", ", i8*");
+        // Replace "(ptr" with "(i8*"
+        result = result.replace("(ptr", "(i8*");
+        // Replace "*ptr" with "*i8*" (for nested pointers)
+        result = result.replace("*ptr", "*i8*");
+        // Replace "ptr," with "i8*," (ptr followed by comma)
+        result = result.replace("ptr,", "i8*,");
+        // Replace "ptr)" with "i8*)" (ptr followed by closing paren)
+        result = result.replace("ptr)", "i8*)");
+        // Replace " ptr\n" with " i8*\n" (ptr at end of line)
+        result = result.replace("ptr\n", "i8*\n");
+        
+        result
+    }
 }
 
 impl<'ctx> Default for JitCompiler<'ctx> {
@@ -361,5 +394,31 @@ mod tests {
         assert_eq!(compiler.should_compile("bar", 0), None);
         compiler.invalidate("bar");
         assert_eq!(compiler.should_compile("bar", 0), None);
+    }
+
+    #[test]
+    fn test_denormalize_opaque_pointers() {
+        // Test conversion from ptr to i8*
+        let input = "call i64 (i64, ptr, i32, ...) @func(i64 %x, ptr @y, i32 0)";
+        let expected = "call i64 (i64, i8*, i32, ...) @func(i64 %x, i8* @y, i32 0)";
+        assert_eq!(JitCompiler::denormalize_opaque_pointers(input), expected);
+        
+        // Test multiple occurrences
+        let input2 = "ptr, ptr, ptr)";
+        let expected2 = "i8*, i8*, i8*)";
+        assert_eq!(JitCompiler::denormalize_opaque_pointers(input2), expected2);
+        
+        // Test ptr at end of line
+        let input3 = "load i64, ptr\nret i64";
+        let expected3 = "load i64, i8*\nret i64";
+        assert_eq!(JitCompiler::denormalize_opaque_pointers(input3), expected3);
+    }
+
+    #[test]
+    fn test_normalize_opaque_pointers() {
+        // Test conversion from i8* to ptr
+        let input = "call i64 @func(i8* %x)";
+        let expected = "call i64 @func(ptr %x)";
+        assert_eq!(JitCompiler::normalize_opaque_pointers(input), expected);
     }
 }
