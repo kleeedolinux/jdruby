@@ -725,6 +725,43 @@ impl MirInterpreter {
                 };
                 self.registers.insert(*dest, result);
             },
+            // Handle DefSingletonMethod - define a singleton method on an object
+            MirInst::DefSingletonMethod(obj_reg, method_name, func_name) => {
+                let obj = self.get_reg(*obj_reg);
+                if let IrValue::Object(class_name, obj_id) = obj {
+                    // Create singleton class name based on object
+                    let singleton_name = format!("#<SingletonClass:{}:{:?}>", class_name, obj_id);
+                    self.class_methods
+                        .entry(singleton_name)
+                        .or_insert_with(HashMap::new)
+                        .insert(method_name.clone(), func_name.clone());
+                }
+            },
+            // Handle BlockInvoke - invoke block with full argument handling
+            MirInst::BlockInvoke { dest, block_reg, args, splat_arg: _, block_arg: _ } => {
+                let result = if let IrValue::Block(func_symbol, captured) = self.get_reg(*block_reg) {
+                    let arg_vals: Vec<IrValue> = args.iter().map(|r| self.get_reg(*r)).collect();
+                    // Try to find and call the function
+                    if let Some(func) = self.functions.get(&func_symbol).cloned() {
+                        // Create new scope with captured vars + call args
+                        let mut call_args = captured.clone();
+                        call_args.extend(arg_vals);
+                        self.call_function(&func, &call_args)
+                    } else {
+                        IrValue::Nil
+                    }
+                } else {
+                    IrValue::Nil
+                };
+                self.registers.insert(*dest, result);
+            },
+            // Handle SendWithIC - send with inline cache (interpreter ignores cache)
+            MirInst::SendWithIC { dest, obj_reg, method_name, args, block_reg: _, cache_slot: _ } => {
+                let recv_val = self.get_reg(*obj_reg);
+                let arg_vals: Vec<IrValue> = args.iter().map(|r| self.get_reg(*r)).collect();
+                let result = self.dispatch_method_call(&recv_val, method_name, &arg_vals);
+                self.registers.insert(*dest, result);
+            },
         }
     }
 
@@ -1053,6 +1090,7 @@ mod tests {
                 }],
                 next_reg: 5,
                 span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                captured_vars: vec![],
             }],
         }
     }
@@ -1089,6 +1127,7 @@ mod tests {
                 }],
                 next_reg: 4,
                 span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                captured_vars: vec![],
             }],
         };
         let mut interp = MirInterpreter::new();
@@ -1134,6 +1173,7 @@ mod tests {
                     }],
                     next_reg: 5,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 MirFunction {
                     name: "test_block".into(),
@@ -1148,6 +1188,7 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
             ],
         };
@@ -1203,6 +1244,7 @@ mod tests {
                     }],
                     next_reg: 6,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 MirFunction {
                     name: "multi_capture_block".into(),
@@ -1217,6 +1259,7 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
             ],
         };
@@ -1272,6 +1315,7 @@ mod tests {
                     }],
                     next_reg: 6,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
             ],
         };
@@ -1320,6 +1364,7 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Task#initialize method
@@ -1341,6 +1386,7 @@ mod tests {
                     }],
                     next_reg: 4,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Task#run method
@@ -1361,6 +1407,7 @@ mod tests {
                     }],
                     next_reg: 4,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Dynamic add_email_task method (created by define_method)
@@ -1381,6 +1428,7 @@ mod tests {
                     }],
                     next_reg: 6,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Dynamic add_backup_task method (created by define_method)  
@@ -1401,6 +1449,7 @@ mod tests {
                     }],
                     next_reg: 6,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Scheduler#create_task_type method (metaprogramming factory)
@@ -1417,6 +1466,7 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Main test function
@@ -1479,6 +1529,7 @@ mod tests {
                     }],
                     next_reg: 15,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 
                 // Task#name reader method (for attr_reader)
@@ -1497,6 +1548,7 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
             ],
         };
@@ -1578,7 +1630,7 @@ mod tests {
                             MirInst::BlockCreate { 
                                 dest: 0, 
                                 func_symbol: "simple_block".into(), 
-                                captured_vars: vec![], // Empty!
+                                captured_vars: vec![],
                                 is_lambda: false 
                             },
                             MirInst::LoadConst(1, MirConst::Integer(123)),
@@ -1588,10 +1640,11 @@ mod tests {
                     }],
                     next_reg: 3,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
                 MirFunction {
                     name: "simple_block".into(),
-                    params: vec![0], // Just the yield arg
+                    params: vec![0],
                     blocks: vec![MirBlock {
                         label: "entry".into(),
                         instructions: vec![
@@ -1601,6 +1654,7 @@ mod tests {
                     }],
                     next_reg: 2,
                     span: jdruby_common::SourceSpan { start: 0, end: 0 },
+                    captured_vars: vec![],
                 },
             ],
         };
