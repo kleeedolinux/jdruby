@@ -1,6 +1,6 @@
 use jdruby_common::SourceSpan;
 
-/// A HIR node — simplified Ruby IR keeping type info and names.
+/// A HIR node — high-level Ruby IR keeping type info and names.
 #[derive(Debug, Clone)]
 pub enum HirNode {
     Literal(HirLiteral),
@@ -21,10 +21,10 @@ pub enum HirNode {
     Nop,
 
     // =========================================================================
-    // METAPROGRAMMING NODES
+    // EXCEPTION HANDLING
     // =========================================================================
-
-    // Blocks and Closures
+    /// Exception handling block: begin/rescue/ensure
+    ExceptionBegin(Box<HirExceptionBegin>),
     /// Block definition: `{ |args| body }` or `do |args| body end`
     BlockDef(Box<HirBlockDef>),
     /// Proc definition: `Proc.new { }` or `proc { }`
@@ -511,5 +511,35 @@ pub struct HirMethodBind {
 pub struct HirInclude {
     pub target_class: Option<HirNode>,
     pub module: HirNode,
+    pub span: SourceSpan,
+}
+
+// ----------------------------------------------------------------------------
+// Exception Handling
+// ----------------------------------------------------------------------------
+
+/// Exception handling block: begin/rescue/ensure/end
+#[derive(Debug, Clone)]
+pub struct HirExceptionBegin {
+    /// Body of the begin block (protected code)
+    pub body: Vec<HirNode>,
+    /// Rescue clauses for exception handling
+    pub rescue_clauses: Vec<HirRescueClause>,
+    /// Else body (executed if no exception was raised)
+    pub else_body: Option<Vec<HirNode>>,
+    /// Ensure body (always executed)
+    pub ensure_body: Option<Vec<HirNode>>,
+    pub span: SourceSpan,
+}
+
+/// A single rescue clause
+#[derive(Debug, Clone)]
+pub struct HirRescueClause {
+    /// Exception types to catch (empty = catch all StandardError)
+    pub exceptions: Vec<HirNode>,
+    /// Variable to bind exception to
+    pub var: Option<String>,
+    /// Handler body
+    pub body: Vec<HirNode>,
     pub span: SourceSpan,
 }

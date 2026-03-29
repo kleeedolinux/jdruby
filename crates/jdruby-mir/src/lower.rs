@@ -1,5 +1,7 @@
 use jdruby_hir::{HirModule, HirNode, HirOp, HirUnaryOp, HirLiteralValue};
 use crate::nodes::*;
+use crate::inline_cache::InlineCacheTable;
+use std::sync::Arc;
 
 /// Lowers HIR to MIR (register-based flat IR).
 pub struct HirLowering {
@@ -13,6 +15,8 @@ pub struct HirLowering {
     block_functions: Vec<MirFunction>,
     /// Current implicit block register (for passing blocks through method calls)
     current_block: Option<RegId>,
+    /// Inline cache table for method dispatch optimization (shared ownership)
+    ic_table: Arc<InlineCacheTable>,
 }
 
 impl HirLowering {
@@ -25,6 +29,7 @@ impl HirLowering {
             pending_label: None,
             block_functions: Vec::new(),
             current_block: None,
+            ic_table: Arc::new(InlineCacheTable::new(256)), // 256 IC slots per module
         }
     }
 
@@ -364,7 +369,19 @@ impl HirLowering {
             HirNode::Yield(args) => {
                 let arg_regs: Vec<RegId> = args.iter().map(|a| self.lower_node(a)).collect();
                 let reg = self.alloc_reg();
-                self.emit(MirInst::Call(reg, "rb_yield".into(), arg_regs));
+                // Use the current block register if available, otherwise load from implicit block
+                let block_reg = self.current_block.unwrap_or_else(|| {
+                    let r = self.alloc_reg();
+                    self.emit(MirInst::CurrentBlock { dest: r });
+                    r
+                });
+                self.emit(MirInst::BlockInvoke {
+                    dest: reg,
+                    block_reg,
+                    args: arg_regs,
+                    splat_arg: None,
+                    block_arg: None,
+                });
                 reg
             }
             HirNode::Break | HirNode::Next => {
@@ -376,6 +393,16 @@ impl HirLowering {
                 let reg = self.alloc_reg();
                 self.emit(MirInst::LoadConst(reg, MirConst::Nil));
                 reg
+            }
+            HirNode::ExceptionBegin(exc) => {
+                // Lower exception handling block
+                // For now, lower the body and ignore rescue/ensure (stub)
+                let mut last_reg = self.alloc_reg();
+                self.emit(MirInst::LoadConst(last_reg, MirConst::Nil));
+                for node in &exc.body {
+                    last_reg = self.lower_node(node);
+                }
+                last_reg
             }
 
             // =====================================================================
@@ -665,7 +692,7 @@ impl HirLowering {
             // Reflection
             HirNode::Send(send) => {
                 let obj_reg = self.lower_node(&send.receiver);
-                let name_reg = self.lower_node(&send.method_name);
+                let name_node = &send.method_name;
                 
                 // Check if last argument is &:symbol (symbol passed as block)
                 let mut arg_regs: Vec<RegId> = Vec::new();
@@ -695,6 +722,27 @@ impl HirLowering {
                 }
                 
                 let reg = self.alloc_reg();
+                
+                // Check if method name is a compile-time constant (symbol literal)
+                // If so, use SendWithIC for optimized dispatch
+                if let HirNode::Literal(lit) = name_node {
+                    if let HirLiteralValue::Symbol(method_name) = &lit.value {
+                        // Static method name - use inline cache
+                        let cache_slot = self.ic_table.alloc_slot();
+                        self.emit(MirInst::SendWithIC { 
+                            dest: reg, 
+                            obj_reg, 
+                            method_name: method_name.clone(), 
+                            args: arg_regs, 
+                            block_reg,
+                            cache_slot,
+                        });
+                        return reg;
+                    }
+                }
+                
+                // Dynamic method name - use generic Send
+                let name_reg = self.lower_node(name_node);
                 self.emit(MirInst::Send { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
                 reg
             }

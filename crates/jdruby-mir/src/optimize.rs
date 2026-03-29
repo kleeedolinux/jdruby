@@ -1,4 +1,6 @@
 use crate::nodes::*;
+use crate::opt_fusion::InstructionFusion;
+use crate::opt_peephole::PeepholeOptimizer;
 use std::collections::{HashMap, HashSet};
 
 /// MIR-level optimizations.
@@ -7,9 +9,16 @@ pub struct MirOptimizer;
 impl MirOptimizer {
     /// Run all MIR optimizations on a module.
     pub fn optimize(module: &mut MirModule) {
+        // Run instruction fusion first (YARV-style)
+        InstructionFusion::optimize(module);
+        
+        // Run standard optimizations on each function
         for func in &mut module.functions {
             Self::optimize_function(func);
         }
+        
+        // Run peephole optimizations last
+        PeepholeOptimizer::optimize(module);
     }
 
     fn optimize_function(func: &mut MirFunction) {

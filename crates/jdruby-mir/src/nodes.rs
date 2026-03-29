@@ -87,6 +87,14 @@ pub enum MirInst {
         block_reg: RegId,
         args: Vec<RegId>,
     },
+    /// Invoke block/proc/lambda with full argument handling: dest = block_invoke(block_reg, args, splat_arg)
+    BlockInvoke {
+        dest: RegId,
+        block_reg: RegId,
+        args: Vec<RegId>,
+        splat_arg: Option<RegId>,
+        block_arg: Option<RegId>,
+    },
     /// Check if block given: dest = block_given?()
     BlockGiven {
         dest: RegId,
@@ -181,6 +189,15 @@ pub enum MirInst {
         name_reg: RegId,
         args: Vec<RegId>,
         block_reg: Option<RegId>,
+    },
+    /// Send with inline cache: optimized for static method names
+    SendWithIC {
+        dest: RegId,
+        obj_reg: RegId,
+        method_name: String,      // known at compile time
+        args: Vec<RegId>,
+        block_reg: Option<RegId>,
+        cache_slot: u32,          // IC slot for fast path
     },
     /// Public send: dest = public_send(obj_reg, name_reg, args, block_reg)
     PublicSend {

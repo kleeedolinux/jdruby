@@ -15,12 +15,11 @@ impl BlockLoweringFactory {
         span: SourceSpan,
     ) -> HirBlockDef {
         let hir_params = params.iter().map(|p| self.lower_param(p)).collect();
-        let (body_nodes, captured_vars) = self.lower_body_with_captures(body, params);
-        let captures_self = self.analyzes_self_capture(body);
+        let (captured_vars, captures_self) = self.analyze_captures(body, params);
 
         HirBlockDef {
             params: hir_params,
-            body: body_nodes,
+            body: body.iter().filter_map(AstLowering::lower_stmt).collect(),
             is_lambda,
             captures_self,
             captured_vars,
@@ -38,25 +37,14 @@ impl BlockLoweringFactory {
         }
     }
 
-    /// Lower body and analyze variable captures
-    fn lower_body_with_captures(
-        &self,
-        body: &[Stmt],
-        params: &[Param],
-    ) -> (Vec<HirNode>, Vec<String>) {
+    /// Analyze variable captures using the enhanced capture analyzer
+    fn analyze_captures(&self, body: &[Stmt], params: &[Param]) -> (Vec<String>, bool) {
         let mut analyzer = CaptureAnalyzer::new();
         // Add block parameters as local vars so they're not captured
         for param in params {
             analyzer.local_vars.insert(param.name.clone());
         }
-        analyzer.analyze_stmts(body);
-
-        let nodes: Vec<HirNode> = body.iter().filter_map(AstLowering::lower_stmt).collect();
-        (nodes, analyzer.captured_vars)
-    }
-
-    fn analyzes_self_capture(&self, _body: &[Stmt]) -> bool {
-        false // Simplified - would need full AST walk
+        analyzer.analyze(body)
     }
 }
 
@@ -64,6 +52,7 @@ impl BlockLoweringFactory {
 pub struct CaptureAnalyzer {
     captured_vars: Vec<String>,
     local_vars: std::collections::HashSet<String>,
+    captured_self: bool,
 }
 
 impl CaptureAnalyzer {
@@ -71,7 +60,13 @@ impl CaptureAnalyzer {
         Self {
             captured_vars: Vec::new(),
             local_vars: std::collections::HashSet::new(),
+            captured_self: false,
         }
+    }
+
+    pub fn analyze(mut self, body: &[Stmt]) -> (Vec<String>, bool) {
+        self.analyze_stmts(body);
+        (self.captured_vars, self.captured_self)
     }
 
     pub fn analyze_stmts(&mut self, stmts: &[Stmt]) {
@@ -89,7 +84,108 @@ impl CaptureAnalyzer {
                     self.local_vars.insert(name.clone());
                 }
             }
-            Stmt::CompoundAssignment(ca) => self.analyze_expr(&ca.value),
+            Stmt::CompoundAssignment(ca) => {
+                self.analyze_expr(&ca.value);
+                if let AssignTarget::LocalVar(name) = &ca.target {
+                    self.local_vars.insert(name.clone());
+                }
+            }
+            Stmt::MethodDef(def) => {
+                // Method definitions introduce their own scope
+                let mut inner = Self::new();
+                for param in &def.params {
+                    inner.local_vars.insert(param.name.clone());
+                }
+                inner.analyze_stmts(&def.body);
+                // Methods don't capture outer scope by default, but body might reference outer vars
+                for (var, _) in inner.captured_vars.iter().zip(0..) {
+                    if !self.local_vars.contains(var) && !self.captured_vars.contains(var) {
+                        self.captured_vars.push(var.clone());
+                    }
+                }
+            }
+            Stmt::If(s) => {
+                self.analyze_expr(&s.condition);
+                self.analyze_stmts(&s.then_body);
+                for elsif in &s.elsif_clauses {
+                    self.analyze_expr(&elsif.condition);
+                    self.analyze_stmts(&elsif.body);
+                }
+                if let Some(else_body) = &s.else_body {
+                    self.analyze_stmts(else_body);
+                }
+            }
+            Stmt::Unless(s) => {
+                self.analyze_expr(&s.condition);
+                self.analyze_stmts(&s.body);
+                if let Some(else_body) = &s.else_body {
+                    self.analyze_stmts(else_body);
+                }
+            }
+            Stmt::While(s) => {
+                self.analyze_expr(&s.condition);
+                self.analyze_stmts(&s.body);
+            }
+            Stmt::Until(s) => {
+                self.analyze_expr(&s.condition);
+                self.analyze_stmts(&s.body);
+            }
+            Stmt::For(s) => {
+                self.local_vars.insert(s.var.clone());
+                self.analyze_expr(&s.iterable);
+                self.analyze_stmts(&s.body);
+            }
+            Stmt::Case(s) => {
+                if let Some(subject) = &s.subject {
+                    self.analyze_expr(subject);
+                }
+                for clause in &s.when_clauses {
+                    for pattern in &clause.patterns {
+                        self.analyze_expr(pattern);
+                    }
+                    self.analyze_stmts(&clause.body);
+                }
+                if let Some(else_body) = &s.else_body {
+                    self.analyze_stmts(else_body);
+                }
+            }
+            Stmt::Return(s) => {
+                if let Some(val) = &s.value {
+                    self.analyze_expr(val);
+                }
+            }
+            Stmt::Yield(s) => {
+                for arg in &s.args {
+                    self.analyze_expr(arg);
+                }
+                // yield implies block usage, captured self might be needed
+                self.captured_self = true;
+            }
+            Stmt::Break(s) => {
+                if let Some(val) = &s.value {
+                    self.analyze_expr(val);
+                }
+            }
+            Stmt::Next(s) => {
+                if let Some(val) = &s.value {
+                    self.analyze_expr(val);
+                }
+            }
+            Stmt::BeginRescue(s) => {
+                self.analyze_stmts(&s.body);
+                for rescue in &s.rescue_clauses {
+                    if let Some(var) = &rescue.var {
+                        self.local_vars.insert(var.clone());
+                    }
+                    self.analyze_stmts(&rescue.body);
+                }
+                if let Some(else_body) = &s.else_body {
+                    self.analyze_stmts(else_body);
+                }
+                if let Some(ensure_body) = &s.ensure_body {
+                    self.analyze_stmts(ensure_body);
+                }
+            }
             _ => {}
         }
     }
@@ -97,15 +193,15 @@ impl CaptureAnalyzer {
     fn analyze_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::LocalVar(v) => {
-                if !self.local_vars.contains(&v.name) {
+                if !self.local_vars.contains(&v.name) && !self.captured_vars.contains(&v.name) {
                     self.captured_vars.push(v.name.clone());
                 }
             }
             Expr::SelfExpr(_) => {
-                // Self is implicitly captured - add to captured_vars
-                if !self.captured_vars.contains(&"self".to_string()) {
-                    self.captured_vars.push("self".to_string());
-                }
+                self.captured_self = true;
+            }
+            Expr::InstanceVar(_) | Expr::ClassVar(_) | Expr::GlobalVar(_) | Expr::ConstRef(_) => {
+                // These don't require local capture, but self might be needed for ivar access
             }
             Expr::BinaryOp(op) => {
                 self.analyze_expr(&op.left);
@@ -118,10 +214,8 @@ impl CaptureAnalyzer {
                 if let Some(recv) = &c.receiver {
                     self.analyze_expr(recv);
                 } else {
-                    // No receiver means implicit self - capture self
-                    if !self.captured_vars.contains(&"self".to_string()) {
-                        self.captured_vars.push("self".to_string());
-                    }
+                    // No receiver means implicit self
+                    self.captured_self = true;
                 }
                 for arg in &c.args {
                     self.analyze_expr(arg);
@@ -134,18 +228,50 @@ impl CaptureAnalyzer {
                 for arg in &bc.call.args {
                     self.analyze_expr(arg);
                 }
-                for stmt in &bc.body {
-                    self.analyze_stmt(stmt);
+                // Analyze block body with new scope
+                let mut inner = Self::new();
+                for param in &bc.params {
+                    inner.local_vars.insert(param.name.clone());
+                }
+                inner.analyze_stmts(&bc.body);
+                // Merge captures from block
+                for var in inner.captured_vars {
+                    if !self.local_vars.contains(&var) && !self.captured_vars.contains(&var) {
+                        self.captured_vars.push(var);
+                    }
+                }
+                if inner.captured_self {
+                    self.captured_self = true;
                 }
             }
             Expr::Lambda(l) => {
-                for stmt in &l.body {
-                    self.analyze_stmt(stmt);
+                let mut inner = Self::new();
+                for param in &l.params {
+                    inner.local_vars.insert(param.name.clone());
+                }
+                inner.analyze_stmts(&l.body);
+                for var in inner.captured_vars {
+                    if !self.local_vars.contains(&var) && !self.captured_vars.contains(&var) {
+                        self.captured_vars.push(var);
+                    }
+                }
+                if inner.captured_self {
+                    self.captured_self = true;
                 }
             }
             Expr::Proc(l) => {
-                for stmt in &l.body {
-                    self.analyze_stmt(stmt);
+                let mut inner = Self::new();
+                for param in &l.params {
+                    inner.local_vars.insert(param.name.clone());
+                }
+                inner.analyze_stmts(&l.body);
+                for var in inner.captured_vars {
+                    if !self.local_vars.contains(&var) && !self.captured_vars.contains(&var) {
+                        self.captured_vars.push(var);
+                    }
+                }
+                if inner.captured_self {
+                    self.captured_self = true;
                 }
             }
             Expr::ArrayLit(a) => {
@@ -166,7 +292,32 @@ impl CaptureAnalyzer {
                     }
                 }
             }
-            _ => {}
+            Expr::Ternary(t) => {
+                self.analyze_expr(&t.condition);
+                self.analyze_expr(&t.then_expr);
+                self.analyze_expr(&t.else_expr);
+            }
+            Expr::RangeLit(r) => {
+                self.analyze_expr(&r.start);
+                self.analyze_expr(&r.end);
+            }
+            Expr::Defined(d) => {
+                self.analyze_expr(&d.expr);
+            }
+            Expr::PatternMatch(pm) => {
+                self.analyze_expr(&pm.subject);
+                self.analyze_expr(&pm.pattern);
+            }
+            Expr::YieldExpr(y) => {
+                for arg in &y.args {
+                    self.analyze_expr(arg);
+                }
+                self.captured_self = true;
+            }
+            // Literals don't capture anything
+            Expr::IntegerLit(_) | Expr::FloatLit(_) | Expr::StringLit(_) |
+            Expr::SymbolLit(_) | Expr::BoolLit(_) | Expr::NilLit(_) |
+            Expr::RegexLit(_) | Expr::SuperCall(_) => {}
         }
     }
 }
@@ -344,7 +495,7 @@ impl AstLowering {
             Stmt::Break(_) => Some(HirNode::Break),
             Stmt::Next(_) => Some(HirNode::Next),
             Stmt::Case(s) => Self::lower_case(s),
-            Stmt::BeginRescue(_) => Some(HirNode::Nop), // simplified for now
+            Stmt::BeginRescue(s) => Self::lower_begin_rescue(s),
             Stmt::Alias(_) | Stmt::Require(_) | Stmt::AttrDecl(_) => {
                 Some(HirNode::Nop)
             }
@@ -400,6 +551,35 @@ impl AstLowering {
             })));
         }
         result.or(Some(HirNode::Nop))
+    }
+
+    fn lower_begin_rescue(s: &BeginRescueStmt) -> Option<HirNode> {
+        let body: Vec<HirNode> = s.body.iter().filter_map(Self::lower_stmt).collect();
+        
+        let rescue_clauses: Vec<HirRescueClause> = s.rescue_clauses.iter().map(|rc| {
+            HirRescueClause {
+                exceptions: rc.exceptions.iter().map(Self::lower_expr).collect(),
+                var: rc.var.clone(),
+                body: rc.body.iter().filter_map(Self::lower_stmt).collect(),
+                span: rc.span,
+            }
+        }).collect();
+        
+        let else_body = s.else_body.as_ref().map(|eb| {
+            eb.iter().filter_map(Self::lower_stmt).collect()
+        });
+        
+        let ensure_body = s.ensure_body.as_ref().map(|eb| {
+            eb.iter().filter_map(Self::lower_stmt).collect()
+        });
+        
+        Some(HirNode::ExceptionBegin(Box::new(HirExceptionBegin {
+            body,
+            rescue_clauses,
+            else_body,
+            ensure_body,
+            span: s.span,
+        })))
     }
 
     fn lower_expr(expr: &Expr) -> HirNode {
