@@ -116,7 +116,7 @@ fn main() {
             if aot {
                 cmd_build(&file, &output, opt_level, debug, emit_ll || emit_ll_v, emit_hir, emit_mir, emit_asm, verbose)
             } else {
-                cmd_build_jit(&file, &output, opt_level, emit_ll_v, verbose)
+                cmd_build_jit(&file, &output, opt_level, emit_ll || emit_ll_v, verbose)
             }
         }
         Commands::Run { file, interp, tier, verbose } => {

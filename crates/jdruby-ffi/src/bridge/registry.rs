@@ -74,6 +74,10 @@ pub struct Registry {
     next_id_lock: Mutex<()>,
     /// Next unique VALUE ID
     next_id: AtomicU64,
+    /// Block storage for metaprogramming
+    blocks: RwLock<HashMap<String, Vec<VALUE>>>,
+    /// Current block for implicit block parameter
+    current_block: RwLock<Option<VALUE>>,
 }
 
 impl Registry {
@@ -82,6 +86,8 @@ impl Registry {
             objects: RwLock::new(HashMap::new()),
             next_id_lock: Mutex::new(()),
             next_id: AtomicU64::new(0x10000), // Start above special constants
+            blocks: RwLock::new(HashMap::new()),
+            current_block: RwLock::new(None),
         }
     }
 
@@ -127,8 +133,28 @@ impl Registry {
         objects.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Store a block with captured variables
+    pub fn store_block(&self, func_symbol: &str, captured: Vec<VALUE>) {
+        let mut blocks = self.blocks.write().unwrap();
+        blocks.insert(func_symbol.to_string(), captured);
+    }
+
+    /// Get current block
+    pub fn get_current_block(&self) -> Option<VALUE> {
+        let block = self.current_block.read().unwrap();
+        *block
+    }
+
+    /// Set current block
+    pub fn set_current_block(&self, block: Option<VALUE>) {
+        let mut current = self.current_block.write().unwrap();
+        *current = block;
+    }
+
+    /// Get captured variables for a block
+    pub fn get_block_captures(&self, func_symbol: &str) -> Option<Vec<VALUE>> {
+        let blocks = self.blocks.read().unwrap();
+        blocks.get(func_symbol).cloned()
     }
 }
 
@@ -149,6 +175,20 @@ where
     let guard = REGISTRY.read().unwrap();
     let registry = guard.as_ref().expect("Bridge not initialized");
     f(registry)
+}
+
+/// Get global bridge for FFI functions (simplified access)
+pub fn get_global_bridge() -> Option<&'static Registry> {
+    // Use a static OnceLock for safe global access
+    use std::sync::OnceLock;
+    static GLOBAL_ACCESS: OnceLock<&'static Registry> = OnceLock::new();
+    
+    let guard = REGISTRY.read().ok()?;
+    guard.as_ref().map(|r| {
+        let ptr: *const Registry = r;
+        // This is safe because REGISTRY lives for program duration
+        unsafe { &*ptr }
+    })
 }
 
 /// Unpin and remove all FFI-bridged objects (called during GC sweep).

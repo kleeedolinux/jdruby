@@ -42,9 +42,13 @@ impl BlockLoweringFactory {
     fn lower_body_with_captures(
         &self,
         body: &[Stmt],
-        _params: &[Param],
+        params: &[Param],
     ) -> (Vec<HirNode>, Vec<String>) {
         let mut analyzer = CaptureAnalyzer::new();
+        // Add block parameters as local vars so they're not captured
+        for param in params {
+            analyzer.local_vars.insert(param.name.clone());
+        }
         analyzer.analyze_stmts(body);
 
         let nodes: Vec<HirNode> = body.iter().filter_map(AstLowering::lower_stmt).collect();
@@ -97,16 +101,69 @@ impl CaptureAnalyzer {
                     self.captured_vars.push(v.name.clone());
                 }
             }
+            Expr::SelfExpr(_) => {
+                // Self is implicitly captured - add to captured_vars
+                if !self.captured_vars.contains(&"self".to_string()) {
+                    self.captured_vars.push("self".to_string());
+                }
+            }
             Expr::BinaryOp(op) => {
                 self.analyze_expr(&op.left);
                 self.analyze_expr(&op.right);
             }
+            Expr::UnaryOp(op) => {
+                self.analyze_expr(&op.operand);
+            }
             Expr::MethodCall(c) => {
                 if let Some(recv) = &c.receiver {
                     self.analyze_expr(recv);
+                } else {
+                    // No receiver means implicit self - capture self
+                    if !self.captured_vars.contains(&"self".to_string()) {
+                        self.captured_vars.push("self".to_string());
+                    }
                 }
                 for arg in &c.args {
                     self.analyze_expr(arg);
+                }
+            }
+            Expr::BlockCall(bc) => {
+                if let Some(recv) = &bc.call.receiver {
+                    self.analyze_expr(recv);
+                }
+                for arg in &bc.call.args {
+                    self.analyze_expr(arg);
+                }
+                for stmt in &bc.body {
+                    self.analyze_stmt(stmt);
+                }
+            }
+            Expr::Lambda(l) => {
+                for stmt in &l.body {
+                    self.analyze_stmt(stmt);
+                }
+            }
+            Expr::Proc(l) => {
+                for stmt in &l.body {
+                    self.analyze_stmt(stmt);
+                }
+            }
+            Expr::ArrayLit(a) => {
+                for elem in &a.elements {
+                    self.analyze_expr(elem);
+                }
+            }
+            Expr::HashLit(h) => {
+                for (k, v) in &h.entries {
+                    self.analyze_expr(k);
+                    self.analyze_expr(v);
+                }
+            }
+            Expr::InterpolatedString(s) => {
+                for part in &s.parts {
+                    if let StringPart::Interpolation(expr) = part {
+                        self.analyze_expr(expr);
+                    }
                 }
             }
             _ => {}
@@ -268,7 +325,11 @@ impl AstLowering {
                 let body: Vec<HirNode> = s.body.iter().filter_map(Self::lower_stmt).collect();
                 Some(HirNode::Call(Box::new(HirCall {
                     receiver: Some(iter), method: "each".into(), args: vec![],
-                    block: Some(HirBlock { params: vec![HirBlockParam { name: s.var.clone(), default_value: None, splat: false, block: false, span: s.span }], body }),
+                    block: Some(HirBlock { 
+                        params: vec![HirBlockParam { name: s.var.clone(), default_value: None, splat: false, block: false, span: s.span }], 
+                        body,
+                        captured_vars: vec![],
+                    }),
                     span: s.span,
                 })))
             }
@@ -423,18 +484,40 @@ impl AstLowering {
                 block: None, span: call.span,
             })),
             Expr::BlockCall(bc) => {
-                let factory = BlockLoweringFactory;
-                let block_def = factory.lower_block_def(&bc.params, &bc.body, false, bc.span);
-                HirNode::Call(Box::new(HirCall {
-                    receiver: bc.call.receiver.as_ref().map(|r| Self::lower_expr(r)),
-                    method: bc.call.method.clone(),
-                    args: bc.call.args.iter().map(Self::lower_expr).collect(),
-                    block: Some(HirBlock {
-                        params: block_def.params,
-                        body: block_def.body,
-                    }),
-                    span: bc.span,
-                }))
+                // Special handling for define_method - it defines a method dynamically
+                if bc.call.method == "define_method" {
+                    // The block body becomes the method body
+                    let factory = BlockLoweringFactory;
+                    let block_def = factory.lower_block_def(&bc.params, &bc.body, false, bc.span);
+                    
+                    // Create a DefineMethod HIR node (or use Call with special marker)
+                    // For now, we'll create a Call but mark it specially
+                    HirNode::Call(Box::new(HirCall {
+                        receiver: bc.call.receiver.as_ref().map(|r| Self::lower_expr(r)),
+                        method: "define_method".into(),
+                        args: bc.call.args.iter().map(Self::lower_expr).collect(),
+                        block: Some(HirBlock {
+                            params: block_def.params,
+                            body: block_def.body,
+                            captured_vars: block_def.captured_vars,
+                        }),
+                        span: bc.span,
+                    }))
+                } else {
+                    let factory = BlockLoweringFactory;
+                    let block_def = factory.lower_block_def(&bc.params, &bc.body, false, bc.span);
+                    HirNode::Call(Box::new(HirCall {
+                        receiver: bc.call.receiver.as_ref().map(|r| Self::lower_expr(r)),
+                        method: bc.call.method.clone(),
+                        args: bc.call.args.iter().map(Self::lower_expr).collect(),
+                        block: Some(HirBlock {
+                            params: block_def.params,
+                            body: block_def.body,
+                            captured_vars: block_def.captured_vars,
+                        }),
+                        span: bc.span,
+                    }))
+                }
             }
             Expr::SuperCall(s) => HirNode::Call(Box::new(HirCall {
                 receiver: None, method: "super".into(),

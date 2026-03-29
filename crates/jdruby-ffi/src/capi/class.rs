@@ -18,10 +18,11 @@ pub unsafe extern "C" fn rb_define_class(name: *const c_char, super_klass: VALUE
 
 /// Define a method on a class.
 #[no_mangle]
-pub unsafe extern "C" fn rb_define_method(klass: VALUE, name: *const c_char, func: usize, arity: c_int) {
+pub unsafe extern "C" fn rb_define_method(klass: VALUE, name: *const c_char, func: *const c_char, arity: c_int) {
     let cstr = CStr::from_ptr(name);
+    let func_cstr = CStr::from_ptr(func);
     with_method_storage(|storage| {
-        storage.define_method(klass, cstr.to_str().unwrap_or(""), func, arity as i32);
+        storage.define_method(klass, cstr.to_str().unwrap_or(""), func_cstr.to_str().unwrap_or(""), arity as i32);
     });
 }
 
@@ -38,31 +39,31 @@ pub unsafe extern "C" fn rb_funcallv(recv: VALUE, mid: ID, argc: c_int, argv: *c
     });
 
     if let Some(entry) = entry {
-        dispatch_c_method(entry.func, entry.arity, recv, args)
+        dispatch_c_method(&entry.func_name, entry.arity, recv, args)
     } else { RUBY_QNIL }
 }
 
 /// Dispatch a C method with proper arity.
-pub unsafe fn dispatch_c_method(func_ptr: usize, arity: i32, recv: VALUE, args: &[VALUE]) -> VALUE {
-    // If func_ptr is a small number, it's likely a string ID, not a real function pointer
-    let actual_func_ptr = if func_ptr < 0x1000 {
-        if let Some(func_name) = rb_id2name_str(func_ptr) {
-            if func_name.contains("__") && func_name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                return RUBY_QNIL;
-            }
-            
-            let func_name_cstr = std::ffi::CString::new(func_name.clone()).unwrap();
-            let symbol = libc::dlsym(libc::RTLD_DEFAULT, func_name_cstr.as_ptr());
-            if symbol.is_null() {
-                return RUBY_QNIL;
-            }
-            symbol as usize
-        } else {
-            return RUBY_QNIL;
+pub unsafe fn dispatch_c_method(func_name: &str, arity: i32, recv: VALUE, args: &[VALUE]) -> VALUE {
+    // Look up function by name using dlsym on the main program
+    let func_name_cstr = std::ffi::CString::new(func_name).unwrap_or_default();
+    
+    // First try RTLD_DEFAULT
+    let mut symbol = libc::dlsym(libc::RTLD_DEFAULT, func_name_cstr.as_ptr());
+    
+    // If not found, try dlopen(NULL) which gets a handle to the main program
+    if symbol.is_null() {
+        let handle = libc::dlopen(std::ptr::null(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if !handle.is_null() {
+            symbol = libc::dlsym(handle, func_name_cstr.as_ptr());
         }
-    } else {
-        func_ptr
-    };
+    }
+    
+    if symbol.is_null() {
+        eprintln!("DEBUG: Could not find function: {} (arity: {}, recv: {}, args: {:?})", func_name, arity, recv, args);
+        return RUBY_QNIL;
+    }
+    let actual_func_ptr = symbol as usize;
     
     match arity {
         0 => std::mem::transmute::<usize, extern "C" fn(VALUE) -> VALUE>(actual_func_ptr)(recv),
@@ -73,6 +74,10 @@ pub unsafe fn dispatch_c_method(func_ptr: usize, arity: i32, recv: VALUE, args: 
         2 => {
             let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE, VALUE) -> VALUE>(actual_func_ptr);
             f(recv, args.first().copied().unwrap_or(RUBY_QNIL), args.get(1).copied().unwrap_or(RUBY_QNIL))
+        }
+        3 => {
+            let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE, VALUE, VALUE) -> VALUE>(actual_func_ptr);
+            f(recv, args.first().copied().unwrap_or(RUBY_QNIL), args.get(1).copied().unwrap_or(RUBY_QNIL), args.get(2).copied().unwrap_or(RUBY_QNIL))
         }
         _ => RUBY_QNIL,
     }

@@ -16,6 +16,8 @@ pub struct MirFunction {
     pub blocks: Vec<MirBlock>,
     pub next_reg: RegId,
     pub span: SourceSpan,
+    /// For block functions: names of captured variables that will be passed as extra params
+    pub captured_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

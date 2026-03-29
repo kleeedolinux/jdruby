@@ -9,6 +9,10 @@ pub struct HirLowering {
     current_insts: Vec<MirInst>,
     /// Pending label for the next block (set by start_block)
     pending_label: Option<BlockLabel>,
+    /// Block functions collected during lowering that need to be emitted
+    block_functions: Vec<MirFunction>,
+    /// Current implicit block register (for passing blocks through method calls)
+    current_block: Option<RegId>,
 }
 
 impl HirLowering {
@@ -19,6 +23,8 @@ impl HirLowering {
             current_blocks: Vec::new(),
             current_insts: Vec::new(),
             pending_label: None,
+            block_functions: Vec::new(),
+            current_block: None,
         }
     }
 
@@ -57,6 +63,9 @@ impl HirLowering {
             }
         }
 
+        // Add all block functions that were collected during lowering
+        functions.extend(std::mem::take(&mut lowering.block_functions));
+
         MirModule { name: module.name.clone(), functions }
     }
 
@@ -67,12 +76,26 @@ impl HirLowering {
         self.current_insts = Vec::new();
         self.pending_label = None;
 
+        // Check if method body contains Yield - if so, add block parameter
+        let has_yield = body.iter().any(|node| contains_yield(node));
+        
+        // Also check if method calls define_method - if so, it needs a block param
+        // because the dynamically defined method might yield
+        let calls_define_method = body.iter().any(|node| contains_define_method(node));
+        
         // Allocate registers for parameters
-        let param_regs: Vec<RegId> = params.iter().map(|p| {
+        let mut param_regs: Vec<RegId> = params.iter().map(|p| {
             let reg = self.alloc_reg();
             self.emit(MirInst::Store(p.clone(), reg));
             reg
         }).collect();
+        
+        // If method yields OR calls define_method, add implicit block parameter
+        if has_yield || calls_define_method {
+            let block_reg = self.alloc_reg();
+            self.emit(MirInst::Store("block".to_string(), block_reg));
+            param_regs.push(block_reg);
+        }
 
         // Lower body
         let mut last_reg = None;
@@ -94,6 +117,7 @@ impl HirLowering {
             blocks: std::mem::take(&mut self.current_blocks),
             next_reg: self.next_reg,
             span: jdruby_common::SourceSpan::default(),
+            captured_vars: vec![],
         }
     }
 
@@ -149,13 +173,87 @@ impl HirLowering {
                 reg
             }
             HirNode::Call(call) => {
-                let arg_regs: Vec<RegId> = call.args.iter().map(|a| self.lower_node(a)).collect();
+                // Check for &:symbol pattern in args - if last arg is a symbol, treat as block
+                let mut processed_args = Vec::new();
+                let mut block_from_symbol = None;
+                
+                for (i, arg) in call.args.iter().enumerate() {
+                    let is_last = i == call.args.len() - 1;
+                    if is_last {
+                        if let HirNode::Literal(lit) = arg {
+                            if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                // This is &:symbol syntax - pass the symbol directly as block
+                                // The C runtime will detect it's a symbol and call #to_proc
+                                let sym_reg = self.alloc_reg();
+                                self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                block_from_symbol = Some(sym_reg);
+                                continue; // Skip adding to args
+                            }
+                        }
+                    }
+                    processed_args.push(self.lower_node(arg));
+                }
+                
+                // Use block from symbol if present, otherwise use call's block or implicit
+                let block_reg = if let Some(block) = block_from_symbol {
+                    Some(block)
+                } else if let Some(ref block) = call.block {
+                    // Create block function from the body
+                    let func_symbol = format!("block_in_{}_{}", call.method, self.next_reg);
+                    let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
+                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &block.captured_vars);
+                    self.block_functions.push(block_func);
+                    
+                    // Load captured variables from the HIR block
+                    let captured_regs: Vec<RegId> = block.captured_vars.iter()
+                        .map(|name| {
+                            let reg = self.alloc_reg();
+                            self.emit(MirInst::Load(reg, name.clone()));
+                            reg
+                        })
+                        .collect();
+                    
+                    // Create block object
+                    let reg = self.alloc_reg();
+                    self.emit(MirInst::BlockCreate {
+                        dest: reg,
+                        func_symbol,
+                        captured_vars: captured_regs,
+                        is_lambda: false,
+                    });
+                    Some(reg)
+                } else {
+                    // Use implicit block if available
+                    self.current_block
+                };
+                
                 let reg = self.alloc_reg();
                 if let Some(recv) = &call.receiver {
                     let recv_reg = self.lower_node(recv);
-                    self.emit(MirInst::MethodCall(reg, recv_reg, call.method.clone(), arg_regs));
+                    
+                    // If block is present, use Send which supports blocks
+                    if let Some(block) = block_reg {
+                        // Load method name as a value (symbol)
+                        let method_reg = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(method_reg, MirConst::Symbol(call.method.clone())));
+                        self.emit(MirInst::Send { dest: reg, obj_reg: recv_reg, name_reg: method_reg, args: processed_args, block_reg: Some(block) });
+                    } else {
+                        self.emit(MirInst::MethodCall(reg, recv_reg, call.method.clone(), processed_args));
+                    }
                 } else {
-                    self.emit(MirInst::Call(reg, call.method.clone(), arg_regs));
+                    // No receiver - this is a function call (not a method call)
+                    // Use Send if block is present, otherwise use Call
+                    if let Some(block) = block_reg {
+                        // For function calls with blocks, we need to use Send
+                        // The "receiver" is the current self/context
+                        let recv_reg = self.alloc_reg();
+                        self.emit(MirInst::Load(recv_reg, "self".to_string()));
+                        let method_reg = self.alloc_reg();
+                        self.emit(MirInst::LoadConst(method_reg, MirConst::Symbol(call.method.clone())));
+                        self.emit(MirInst::Send { dest: reg, obj_reg: recv_reg, name_reg: method_reg, args: processed_args, block_reg: Some(block) });
+                    } else {
+                        self.emit(MirInst::Call(reg, call.method.clone(), processed_args));
+                    }
                 }
                 reg
             }
@@ -286,6 +384,12 @@ impl HirLowering {
 
             // Blocks and Closures
             HirNode::BlockDef(block_def) => {
+                // Create the block function from the body
+                let func_symbol = format!("block_{}_{}", self.current_blocks.len(), self.next_reg);
+                let block_func = self.lower_block_function(&func_symbol, &block_def.params, &block_def.body, &block_def.captured_vars);
+                self.block_functions.push(block_func);
+
+                // Load captured variables
                 let captured_regs: Vec<RegId> = block_def.captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
@@ -293,17 +397,28 @@ impl HirLowering {
                         reg
                     })
                     .collect();
+
+                // Create block referencing the function
                 let reg = self.alloc_reg();
-                let func_symbol = format!("block_{}_{}", self.current_blocks.len(), reg);
                 self.emit(MirInst::BlockCreate {
                     dest: reg,
                     func_symbol,
                     captured_vars: captured_regs,
                     is_lambda: block_def.is_lambda,
                 });
+                
+                // Set as current block for implicit propagation
+                self.current_block = Some(reg);
+                
                 reg
             }
             HirNode::ProcDef(proc_def) => {
+                // Create the proc function from the body
+                let func_symbol = format!("proc_{}_{}", self.current_blocks.len(), self.next_reg);
+                let proc_func = self.lower_block_function(&func_symbol, &proc_def.params, &proc_def.body, &proc_def.captured_vars);
+                self.block_functions.push(proc_func);
+
+                // Load captured variables
                 let captured_regs: Vec<RegId> = proc_def.captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
@@ -311,19 +426,28 @@ impl HirLowering {
                         reg
                     })
                     .collect();
+
+                // Create block
                 let block_reg = self.alloc_reg();
-                let func_symbol = format!("proc_{}_{}", self.current_blocks.len(), block_reg);
                 self.emit(MirInst::BlockCreate {
                     dest: block_reg,
                     func_symbol,
                     captured_vars: captured_regs,
                     is_lambda: false,
                 });
+
+                // Wrap in Proc
                 let reg = self.alloc_reg();
                 self.emit(MirInst::ProcCreate { dest: reg, block_reg });
                 reg
             }
             HirNode::LambdaDef(lambda_def) => {
+                // Create the lambda function from the body
+                let func_symbol = format!("lambda_{}_{}", self.current_blocks.len(), self.next_reg);
+                let lambda_func = self.lower_block_function(&func_symbol, &lambda_def.params, &lambda_def.body, &lambda_def.captured_vars);
+                self.block_functions.push(lambda_func);
+
+                // Load captured variables
                 let captured_regs: Vec<RegId> = lambda_def.captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
@@ -331,14 +455,17 @@ impl HirLowering {
                         reg
                     })
                     .collect();
+
+                // Create block
                 let block_reg = self.alloc_reg();
-                let func_symbol = format!("lambda_{}_{}", self.current_blocks.len(), block_reg);
                 self.emit(MirInst::BlockCreate {
                     dest: block_reg,
                     func_symbol,
                     captured_vars: captured_regs,
                     is_lambda: true,
                 });
+
+                // Wrap in Lambda
                 let reg = self.alloc_reg();
                 self.emit(MirInst::LambdaCreate { dest: reg, block_reg });
                 reg
@@ -539,12 +666,34 @@ impl HirLowering {
             HirNode::Send(send) => {
                 let obj_reg = self.lower_node(&send.receiver);
                 let name_reg = self.lower_node(&send.method_name);
-                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
-                let block_reg = send.block.as_ref().map(|_| {
+                
+                // Check if last argument is &:symbol (symbol passed as block)
+                let mut arg_regs: Vec<RegId> = Vec::new();
+                let mut block_reg = send.block.as_ref().map(|_| {
                     let r = self.alloc_reg();
                     self.emit(MirInst::LoadConst(r, MirConst::Nil));
                     r
                 });
+                
+                // Process args, checking for &:symbol pattern
+                for (i, arg) in send.args.iter().enumerate() {
+                    let is_last = i == send.args.len() - 1;
+                    if is_last {
+                        // Check if this is a symbol that should be passed as block
+                        if let HirNode::Literal(lit) = arg {
+                            if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                // This is &:symbol syntax - pass the symbol directly as block
+                                // The C runtime will detect it's a symbol and call #to_proc
+                                let sym_reg = self.alloc_reg();
+                                self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                block_reg = Some(sym_reg);
+                                continue; // Skip adding to args
+                            }
+                        }
+                    }
+                    arg_regs.push(self.lower_node(arg));
+                }
+                
                 let reg = self.alloc_reg();
                 self.emit(MirInst::Send { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
                 reg
@@ -552,12 +701,33 @@ impl HirLowering {
             HirNode::PublicSend(send) => {
                 let obj_reg = self.lower_node(&send.receiver);
                 let name_reg = self.lower_node(&send.method_name);
-                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
-                let block_reg = send.block.as_ref().map(|_| {
+                
+                // Check if last argument is &:symbol (symbol passed as block)
+                let mut arg_regs: Vec<RegId> = Vec::new();
+                let mut block_reg = send.block.as_ref().map(|_| {
                     let r = self.alloc_reg();
                     self.emit(MirInst::LoadConst(r, MirConst::Nil));
                     r
                 });
+                
+                // Process args, checking for &:symbol pattern
+                for (i, arg) in send.args.iter().enumerate() {
+                    let is_last = i == send.args.len() - 1;
+                    if is_last {
+                        if let HirNode::Literal(lit) = arg {
+                            if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                // This is &:symbol syntax - pass the symbol directly as block
+                                // The C runtime will detect it's a symbol and call #to_proc
+                                let sym_reg = self.alloc_reg();
+                                self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                block_reg = Some(sym_reg);
+                                continue;
+                            }
+                        }
+                    }
+                    arg_regs.push(self.lower_node(arg));
+                }
+                
                 let reg = self.alloc_reg();
                 self.emit(MirInst::PublicSend { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
                 reg
@@ -565,12 +735,33 @@ impl HirLowering {
             HirNode::InternalSend(send) => {
                 let obj_reg = self.lower_node(&send.receiver);
                 let name_reg = self.lower_node(&send.method_name);
-                let arg_regs: Vec<RegId> = send.args.iter().map(|a| self.lower_node(a)).collect();
-                let block_reg = send.block.as_ref().map(|_| {
+                
+                // Check if last argument is &:symbol (symbol passed as block)
+                let mut arg_regs: Vec<RegId> = Vec::new();
+                let mut block_reg = send.block.as_ref().map(|_| {
                     let r = self.alloc_reg();
                     self.emit(MirInst::LoadConst(r, MirConst::Nil));
                     r
                 });
+                
+                // Process args, checking for &:symbol pattern
+                for (i, arg) in send.args.iter().enumerate() {
+                    let is_last = i == send.args.len() - 1;
+                    if is_last {
+                        if let HirNode::Literal(lit) = arg {
+                            if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                // This is &:symbol syntax - pass the symbol directly as block
+                                // The C runtime will detect it's a symbol and call #to_proc
+                                let sym_reg = self.alloc_reg();
+                                self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                block_reg = Some(sym_reg);
+                                continue;
+                            }
+                        }
+                    }
+                    arg_regs.push(self.lower_node(arg));
+                }
+                
                 let reg = self.alloc_reg();
                 self.emit(MirInst::Send { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
                 reg
@@ -800,6 +991,116 @@ impl HirLowering {
             HirOp::Shl => MirBinOp::Shl,
             HirOp::Shr => MirBinOp::Shr,
         }
+    }
+
+    /// Lower a block body into a separate MIR function
+    fn lower_block_function(&mut self, name: &str, params: &[jdruby_hir::HirBlockParam], body: &[HirNode], captured_vars: &[String]) -> MirFunction {
+        // Save current state
+        let saved_next_reg = self.next_reg;
+        let saved_next_block = self.next_block;
+        let saved_blocks = std::mem::take(&mut self.current_blocks);
+        let saved_insts = std::mem::take(&mut self.current_insts);
+        let saved_pending = self.pending_label.take();
+
+        // Reset for new function
+        self.next_reg = 0;
+        self.next_block = 0;
+
+        // Allocate registers for block parameters
+        let param_regs: Vec<RegId> = params.iter().map(|p| {
+            let reg = self.alloc_reg();
+            self.emit(MirInst::Store(p.name.clone(), reg));
+            reg
+        }).collect();
+
+        // Lower block body
+        let mut last_reg = None;
+        for node in body {
+            last_reg = Some(self.lower_node(node));
+        }
+
+        // Finalize block
+        let terminator = if let Some(r) = last_reg {
+            MirTerminator::Return(Some(r))
+        } else {
+            MirTerminator::Return(None)
+        };
+        self.finish_block(terminator);
+
+        // Create the function with captured variable tracking
+        let func = MirFunction {
+            name: name.to_string(),
+            params: param_regs,
+            blocks: std::mem::take(&mut self.current_blocks),
+            next_reg: self.next_reg,
+            span: jdruby_common::SourceSpan::default(),
+            captured_vars: captured_vars.to_vec(),
+        };
+
+        // Restore state
+        self.next_reg = saved_next_reg;
+        self.next_block = saved_next_block;
+        self.current_blocks = saved_blocks;
+        self.current_insts = saved_insts;
+        self.pending_label = saved_pending;
+
+        func
+    }
+}
+
+/// Check if a HIR node contains a Yield expression (recursively)
+fn contains_yield(node: &HirNode) -> bool {
+    match node {
+        HirNode::Yield(_) => true,
+        HirNode::BinOp(op) => contains_yield(&op.left) || contains_yield(&op.right),
+        HirNode::UnOp(op) => contains_yield(&op.operand),
+        HirNode::Call(call) => {
+            call.receiver.as_ref().map_or(false, contains_yield) ||
+            call.args.iter().any(contains_yield) ||
+            call.block.as_ref().map_or(false, |b| b.body.iter().any(contains_yield))
+        }
+        HirNode::Assign(assign) => contains_yield(&assign.value),
+        HirNode::Branch(branch) => {
+            contains_yield(&branch.condition) ||
+            branch.then_body.iter().any(contains_yield) ||
+            branch.else_body.iter().any(contains_yield)
+        }
+        HirNode::Loop(lp) => {
+            contains_yield(&lp.condition) ||
+            lp.body.iter().any(contains_yield)
+        }
+        HirNode::Return(ret) => ret.value.as_ref().map_or(false, contains_yield),
+        HirNode::Seq(nodes) => nodes.iter().any(contains_yield),
+        _ => false,
+    }
+}
+
+/// Check if a HIR node contains a call to define_method (recursively)
+fn contains_define_method(node: &HirNode) -> bool {
+    match node {
+        HirNode::Call(call) => {
+            if call.method == "define_method" {
+                return true;
+            }
+            call.receiver.as_ref().map_or(false, contains_define_method) ||
+            call.args.iter().any(contains_define_method) ||
+            call.block.as_ref().map_or(false, |b| b.body.iter().any(contains_define_method))
+        }
+        HirNode::BinOp(op) => contains_define_method(&op.left) || contains_define_method(&op.right),
+        HirNode::UnOp(op) => contains_define_method(&op.operand),
+        HirNode::Assign(assign) => contains_define_method(&assign.value),
+        HirNode::Branch(branch) => {
+            contains_define_method(&branch.condition) ||
+            branch.then_body.iter().any(contains_define_method) ||
+            branch.else_body.iter().any(contains_define_method)
+        }
+        HirNode::Loop(lp) => {
+            contains_define_method(&lp.condition) ||
+            lp.body.iter().any(contains_define_method)
+        }
+        HirNode::Return(ret) => ret.value.as_ref().map_or(false, contains_define_method),
+        HirNode::Seq(nodes) => nodes.iter().any(contains_define_method),
+        _ => false,
     }
 }
 

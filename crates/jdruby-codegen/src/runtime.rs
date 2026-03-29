@@ -111,6 +111,8 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     RuntimeFn { name: "jdruby_lambda_create", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_block_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_current_block", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    RuntimeFn { name: "jdruby_symbol_to_proc", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_is_symbol", ret_type: RuntimeType::I1, param_types: &[RuntimeType::I64], variadic: false },
     
     // Dynamic method operations
     RuntimeFn { name: "jdruby_define_method_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: false },
@@ -182,8 +184,9 @@ pub fn emit_runtime_decls<'ctx>(ctx: &'ctx Context, module: &Module<'ctx>) {
             RuntimeType::I64 => i64_type.into(),
             _ => i64_type.into(),
         };
-        // Add global with i64 type, but load/store will use ptr_type
-        module.add_global(llvm_ty, None, name);
+        // Add global with i64 type and external linkage
+        let global = module.add_global(llvm_ty, None, name);
+        global.set_linkage(inkwell::module::Linkage::External);
     }
     
     // Emit function declarations

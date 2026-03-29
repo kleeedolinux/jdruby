@@ -178,6 +178,7 @@ pub struct HirCall {
 pub struct HirBlock {
     pub params: Vec<HirBlockParam>,
     pub body: Vec<HirNode>,
+    pub captured_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

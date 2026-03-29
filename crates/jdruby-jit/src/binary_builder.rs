@@ -187,10 +187,6 @@ impl<'ctx> BinaryBuilder<'ctx> {
     fn get_linker_args(&self) -> Vec<String> {
         let mut args = vec![];
 
-        if self.config.static_link {
-            args.push("-static".to_string());
-        }
-
         // Add library search paths for target directory
         // Static libraries are built by cargo as lib<crate>.a files
         args.push("-L".to_string());
@@ -198,16 +194,34 @@ impl<'ctx> BinaryBuilder<'ctx> {
         args.push("-L".to_string());
         args.push("target/release".to_string());
 
+        // Note: removed -static flag as it prevents C runtime initialization
+        // needed for I/O functions like println! to work properly
+        // Add -no-pie since LLVM generates non-PIE object files
+        args.push("-no-pie".to_string());
+
+        // Export all dynamic symbols so dlsym can find compiled functions
+        args.push("-rdynamic".to_string());
+        args.push("-Wl,--export-dynamic".to_string());
+
+        // Force static linking of Rust libraries
+        args.push("-Wl,-Bstatic".to_string());
+
         // Link against JDRuby runtime libraries
-        // These are built as static libraries from the Rust crates
-        args.push("-ljdruby_runtime".to_string());
+        // Order matters: put most dependent libraries first
         args.push("-ljdruby_ffi".to_string());
+        args.push("-ljdruby_runtime".to_string());
         args.push("-ljdgc".to_string());
 
-        // System libraries
+        // Switch back to dynamic linking for system libraries
+        args.push("-Wl,-Bdynamic".to_string());
+
+        // System libraries - must come after Rust libraries
+        // as Rust code depends on them
         args.push("-lpthread".to_string());
         args.push("-ldl".to_string());
         args.push("-lm".to_string());
+        // Include C runtime for proper initialization
+        args.push("-lc".to_string());
 
         if self.config.strip_symbols {
             args.push("-s".to_string());
@@ -272,7 +286,8 @@ mod tests {
         let builder = BinaryBuilder::new(&context, config);
         
         let args = builder.get_linker_args();
-        assert!(args.contains(&"-static".to_string()));
+        assert!(!args.contains(&"-static".to_string())); // No longer using static
         assert!(args.contains(&"-lpthread".to_string()));
+        assert!(args.contains(&"-ljdruby_ffi".to_string()));
     }
 }

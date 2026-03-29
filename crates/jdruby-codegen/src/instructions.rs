@@ -30,10 +30,16 @@ pub fn emit_function<'ctx>(
 ) -> Result<FunctionValue<'ctx>, Vec<Diagnostic>> {
     let i64_type = llvm_ctx.i64_type();
     
-    // Create function type: i64 @func_name(i64, i64, ...)
-    let fn_type = i64_type.fn_type(&vec![i64_type.into(); func.params.len()], false);
+    // Get or create function
     let fn_name = sanitize_name(&func.name);
-    let function = module.add_function(&fn_name, fn_type, None);
+    let function = if let Some(existing) = module.get_function(&fn_name) {
+        // Function was pre-declared, use it
+        existing
+    } else {
+        // Create function type: i64 @func_name(i64, i64, ...)
+        let fn_type = i64_type.fn_type(&vec![i64_type.into(); func.params.len()], false);
+        module.add_function(&fn_name, fn_type, None)
+    };
     
     // Create all basic blocks first
     let mut blocks: HashMap<String, BasicBlock<'ctx>> = HashMap::new();
@@ -59,14 +65,7 @@ pub fn emit_function<'ctx>(
         }
     }
     
-    // Map params to registers
-    let mut reg_map: RegMap = HashMap::new();
-    for (i, reg_id) in func.params.iter().enumerate() {
-        let param = function.get_nth_param(i as u32).unwrap();
-        reg_map.insert(*reg_id, param);
-    }
-    
-    // Collect all locals that need allocas
+    // Collect all locals that need allocas (including captured vars)
     let locals = collect_locals(func);
     
     // Create allocas for locals in the entry block
@@ -76,8 +75,50 @@ pub fn emit_function<'ctx>(
         local_allocs.insert(local.clone(), alloca);
     }
     
-    // Store self if present
-    if !func.params.is_empty() {
+    // Initialize local_self for main (top-level self is the main object)
+    if func.name == "main" {
+        if let Some(self_alloca) = local_allocs.get("self") {
+            let main_self = module.get_global("JDRUBY_NIL");
+            if let Some(global) = main_self {
+                let self_val = builder.build_load(i64_type, global.as_pointer_value(), "main_self").unwrap();
+                builder.build_store(*self_alloca, self_val).unwrap();
+            }
+        }
+    }
+    
+    // Map params to registers (captured vars come first for block functions, then actual params)
+    let mut reg_map: RegMap = HashMap::new();
+    let captured_count = func.captured_vars.len();
+    let is_block_function = func.name.starts_with("block_") || func.name.starts_with("block_in_") || func.name.starts_with("__sym_proc_");
+    
+    // For block functions: captured vars are passed as the first N parameters
+    if is_block_function {
+        for (i, var_name) in func.captured_vars.iter().enumerate() {
+            let param = function.get_nth_param(i as u32).unwrap();
+            // Store captured var into its local alloca
+            if let Some(alloca) = local_allocs.get(var_name) {
+                builder.build_store(*alloca, param).unwrap();
+            }
+            // Don't add to reg_map - captured vars are accessed via Load instructions
+        }
+        
+        // Map actual function params (after captured vars)
+        for (i, reg_id) in func.params.iter().enumerate() {
+            let param_idx = (captured_count + i) as u32;
+            let param = function.get_nth_param(param_idx).unwrap();
+            reg_map.insert(*reg_id, param);
+        }
+    } else {
+        // Regular function: just map params directly
+        for (i, reg_id) in func.params.iter().enumerate() {
+            let param = function.get_nth_param(i as u32).unwrap();
+            reg_map.insert(*reg_id, param);
+        }
+    }
+    
+    // Store self if present AND if the first param is not register 0
+    // (register 0 will be stored via MIR Store instruction)
+    if !func.params.is_empty() && func.params[0] != 0 {
         let self_val = function.get_nth_param(0).unwrap();
         if let Some(self_alloca) = local_allocs.get("self") {
             builder.build_store(*self_alloca, self_val).unwrap();
@@ -125,6 +166,11 @@ fn collect_locals(func: &MirFunction) -> std::collections::HashSet<String> {
                 }
             }
         }
+    }
+    
+    // Add captured variables as locals so they get allocas
+    for captured in &func.captured_vars {
+        locals.insert(captured.clone());
     }
     
     let has_self = !func.params.is_empty();
@@ -710,52 +756,81 @@ fn emit_call<'ctx>(
             Ok(val.try_as_basic_value().unwrap_basic())
         }
         _ => {
-            // Default: call jdruby_send with self
-            let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
-            
-            // Get self value - for top-level functions without self param, use nil
-            let self_val = if let Some(self_alloca) = local_allocs.get("self") {
-                builder.build_load(i64_type, *self_alloca, "self").unwrap()
-            } else {
-                // Top-level code without self - use nil as receiver
-                let global = module.get_global("JDRUBY_NIL").unwrap();
-                builder.build_load(i64_type, global.as_pointer_value(), "nil_self").unwrap()
-            };
-            
-            // Create method name string with unique name
-            let i8_type = llvm_ctx.i8_type();
-            let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
-            let name_len = name.len();
-            let array_type = i8_type.array_type((name_len + 1) as u32);
-            let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let global = module.add_global(array_type, None, &format!("meth_call_{}", counter));
-            global.set_linkage(inkwell::module::Linkage::Private);
-            let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
-            bytes.push(i8_type.const_int(0, false));
-            global.set_initializer(&i8_type.const_array(&bytes));
-            
-            let ptr = global.as_pointer_value();
-            let zero = llvm_ctx.i64_type().const_int(0, false);
-            let meth_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
-            
-            let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
-            
-            // Build argv array on stack if there are arguments
-            let argv_ptr = if args.is_empty() {
-                i64_ptr_type.const_null()
-            } else {
-                let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "argv").unwrap();
-                for (i, &arg) in args.iter().enumerate() {
-                    let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
-                    let idx = i64_type.const_int(i as u64, false);
-                    let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("argv_{}", i)).unwrap() };
-                    builder.build_store(elem_ptr, arg_val).unwrap();
+            // Check if function exists in the module (for direct calls)
+            let func_name = sanitize_name(name);
+            if let Some(func_val) = module.get_function(&func_name) {
+                // Function exists - call it directly
+                let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = vec![];
+                
+                // For top-level functions without self, we may need to pass nil as first arg
+                // Check if function expects a self parameter
+                let param_count = func_val.get_params().len();
+                let args_count = args.len();
+                
+                if param_count > 0 && args_count < param_count {
+                    // Need to add nil for self parameter
+                    let global = module.get_global("JDRUBY_NIL").unwrap();
+                    let nil_val = builder.build_load(i64_type, global.as_pointer_value(), "nil_self").unwrap();
+                    arg_vals.push(nil_val.into());
                 }
-                unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "argv_ptr").unwrap() }
-            };
-            
-            let val = builder.build_call(fn_val, &[self_val.into(), meth_ptr.into(), argc_val.into(), argv_ptr.into()], "send").unwrap();
-            Ok(val.try_as_basic_value().unwrap_basic())
+                
+                // Add remaining arguments
+                for &arg in args {
+                    let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+                    arg_vals.push(arg_val.into());
+                }
+                
+                let val = builder.build_call(func_val, &arg_vals, &format!("call_{}", name)).unwrap();
+                Ok(val.try_as_basic_value().unwrap_basic())
+            } else {
+                // Function doesn't exist - fall back to jdruby_send for method dispatch
+                let fn_val = get_runtime_fn_value(module, "jdruby_send").unwrap();
+                
+                // Get self value - for top-level functions without self param, use nil
+                // (register 0 will be stored via MIR Store instruction)
+                let self_val = if let Some(self_alloca) = local_allocs.get("self") {
+                    builder.build_load(i64_type, *self_alloca, "self").unwrap()
+                } else {
+                    // Top-level code without self - use nil as receiver
+                    let global = module.get_global("JDRUBY_NIL").unwrap();
+                    builder.build_load(i64_type, global.as_pointer_value(), "nil_self").unwrap()
+                };
+                
+                // Create method name string with unique name
+                let i8_type = llvm_ctx.i8_type();
+                let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
+                let name_len = name.len();
+                let array_type = i8_type.array_type((name_len + 1) as u32);
+                let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+                let global = module.add_global(array_type, None, &format!("meth_call_{}", counter));
+                global.set_linkage(inkwell::module::Linkage::Private);
+                let mut bytes: Vec<_> = name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
+                bytes.push(i8_type.const_int(0, false));
+                global.set_initializer(&i8_type.const_array(&bytes));
+                
+                let ptr = global.as_pointer_value();
+                let zero = llvm_ctx.i64_type().const_int(0, false);
+                let meth_ptr = unsafe { builder.build_gep(array_type, ptr, &[zero, zero], "meth_ptr").unwrap() };
+                
+                let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
+                
+                // Build argv array on stack if there are arguments
+                let argv_ptr = if args.is_empty() {
+                    i64_ptr_type.const_null()
+                } else {
+                    let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "argv").unwrap();
+                    for (i, &arg) in args.iter().enumerate() {
+                        let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+                        let idx = i64_type.const_int(i as u64, false);
+                        let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("argv_{}", i)).unwrap() };
+                        builder.build_store(elem_ptr, arg_val).unwrap();
+                    }
+                    unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "argv_ptr").unwrap() }
+                };
+                
+                let val = builder.build_call(fn_val, &[self_val.into(), meth_ptr.into(), argc_val.into(), argv_ptr.into()], "send").unwrap();
+                Ok(val.try_as_basic_value().unwrap_basic())
+            }
         }
     }
 }

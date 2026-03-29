@@ -121,7 +121,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Emit runtime declarations
         runtime::emit_runtime_decls(self.llvm_context, &llvm_module);
 
-        // Emit all functions
+        // PASS 1: Pre-declare all function signatures
+        for func in &module.functions {
+            let i64_type = self.llvm_context.i64_type();
+            // Only block functions have captured vars as extra parameters
+            // Regular methods have their declared params only
+            let total_params = if func.name.starts_with("block_") || func.name.starts_with("block_in_") || func.name.starts_with("__sym_proc_") {
+                func.params.len() + func.captured_vars.len()
+            } else {
+                func.params.len()
+            };
+            let fn_type = i64_type.fn_type(&vec![i64_type.into(); total_params], false);
+            let fn_name = utils::sanitize_name(&func.name);
+            llvm_module.add_function(&fn_name, fn_type, None);
+        }
+
+        // PASS 2: Emit function bodies
         eprintln!("DEBUG: Emitting {} functions to LLVM IR", module.functions.len());
         for (i, func) in module.functions.iter().enumerate() {
             eprintln!("DEBUG: Emitting function {}: {}", i, func.name);
@@ -177,7 +192,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Emit runtime declarations
         runtime::emit_runtime_decls(self.llvm_context, &llvm_module);
 
-        // Emit all functions
+        // PASS 1: Pre-declare all function signatures
+        for func in &module.functions {
+            let i64_type = self.llvm_context.i64_type();
+            // Only block functions have captured vars as extra parameters
+            // Regular methods have their declared params only
+            let total_params = if func.name.starts_with("block_") || func.name.starts_with("block_in_") || func.name.starts_with("__sym_proc_") {
+                func.params.len() + func.captured_vars.len()
+            } else {
+                func.params.len()
+            };
+            let fn_type = i64_type.fn_type(&vec![i64_type.into(); total_params], false);
+            let fn_name = utils::sanitize_name(&func.name);
+            llvm_module.add_function(&fn_name, fn_type, None);
+        }
+
+        // PASS 2: Emit function bodies
         for func in &module.functions {
             if let Err(diagnostics) = instructions::emit_function(
                 func,
@@ -244,6 +274,7 @@ mod tests {
                 }],
                 next_reg: 2,
                 span: jdruby_common::SourceSpan::default(),
+                captured_vars: vec![],
             }],
         }
     }
@@ -470,6 +501,7 @@ mod tests {
             }],
             next_reg: 13,
             span: jdruby_common::SourceSpan::default(),
+            captured_vars: vec![],
         });
         
         let result = generate_ir(&module);
