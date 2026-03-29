@@ -198,7 +198,7 @@ impl<'ctx> TypedValues<'ctx> {
         self.values.get(index)
     }
 
-    pub fn iter(&self) -> std::slice::Iter<TypedValue<'ctx>> {
+    pub fn iter(&self) -> std::slice::Iter<'_, TypedValue<'ctx>> {
         self.values.iter()
     }
 

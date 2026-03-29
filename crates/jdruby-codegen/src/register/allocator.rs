@@ -153,6 +153,7 @@ impl Default for VirtualRegisterAllocator {
 #[derive(Debug)]
 pub struct LivenessResult {
     /// Number of blocks in the function.
+    #[allow(dead_code)]
     block_count: u32,
     /// Registers live at entry to each block.
     live_in: Vec<Vec<RegId>>,

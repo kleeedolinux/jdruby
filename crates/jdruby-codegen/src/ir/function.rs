@@ -4,7 +4,7 @@
 
 use crate::ir::{TypedValue, RubyType, TypeProvider};
 use crate::register::{VirtualRegisterAllocator, virtual_reg::RegId, virtual_reg::InstIndex};
-use crate::constants::{StringPool, ConstantTable};
+use crate::constants::ConstantTable;
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -30,12 +30,6 @@ pub struct FunctionCodegen<'ctx, 'm> {
     /// Current block being generated.
     current_block: Option<BasicBlock<'ctx>>,
 
-    /// String pool for this module.
-    string_pool: &'m StringPool<'ctx, 'm>,
-
-    /// Constant table for this module.
-    constant_table: &'m ConstantTable<'ctx, 'm>,
-
     /// LLVM context.
     llvm_context: &'ctx Context,
 
@@ -49,8 +43,6 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
         name: String,
         llvm_context: &'ctx Context,
         llvm_module: &'m Module<'ctx>,
-        string_pool: &'m StringPool<'ctx, 'm>,
-        constant_table: &'m ConstantTable<'ctx, 'm>,
     ) -> Self {
         Self {
             name,
@@ -58,8 +50,6 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
             register_values: HashMap::new(),
             blocks: HashMap::new(),
             current_block: None,
-            string_pool,
-            constant_table,
             llvm_context,
             llvm_module,
         }
@@ -80,16 +70,6 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
         self.llvm_module
     }
 
-    /// Get the string pool.
-    pub fn string_pool(&self) -> &'m StringPool<'ctx, 'm> {
-        self.string_pool
-    }
-
-    /// Get the constant table.
-    pub fn constant_table(&self) -> &'m ConstantTable<'ctx, 'm> {
-        self.constant_table
-    }
-
     /// Set a register value.
     pub fn set_register(&mut self, reg: RegId, value: TypedValue<'ctx>) {
         self.register_values.insert(reg, value);
@@ -101,12 +81,12 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
     }
 
     /// Get a register value or return a default (nil).
-    pub fn get_register_or_nil(&self, reg: RegId) -> TypedValue<'ctx> {
+    pub fn get_register_or_nil(&self, reg: RegId, constant_table: &ConstantTable<'ctx, 'm>) -> TypedValue<'ctx> {
         self.get_register(reg)
             .cloned()
             .unwrap_or_else(|| {
                 TypedValue::new(
-                    self.constant_table.get_nil(),
+                    constant_table.get_nil(),
                     RubyType::Nil,
                     None,
                 )
