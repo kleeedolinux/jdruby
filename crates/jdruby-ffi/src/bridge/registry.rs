@@ -5,7 +5,7 @@
 //! simplifies lookup logic.
 
 use std::collections::HashMap;
-use std::sync::{RwLock, Mutex};
+use std::sync::{RwLock, Mutex, LazyLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use jdgc::GcPtr;
 use crate::core::VALUE;
@@ -183,12 +183,23 @@ pub fn get_global_bridge() -> Option<&'static Registry> {
     use std::sync::OnceLock;
     static GLOBAL_ACCESS: OnceLock<&'static Registry> = OnceLock::new();
     
-    let guard = REGISTRY.read().ok()?;
-    guard.as_ref().map(|r| {
-        let ptr: *const Registry = r;
-        // This is safe because REGISTRY lives for program duration
-        unsafe { &*ptr }
-    })
+    GLOBAL_ACCESS.get_or_init(|| {
+        let guard = REGISTRY.read().unwrap();
+        if let Some(registry) = guard.as_ref() {
+            let ptr: *const Registry = registry;
+            // This is safe because REGISTRY lives for program duration
+            unsafe { &*ptr }
+        } else {
+            // Return a dummy registry if none exists
+            static EMPTY_REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry::new());
+            &EMPTY_REGISTRY
+        }
+    });
+    
+    Some(GLOBAL_ACCESS.get().copied().unwrap_or_else(|| {
+        static EMPTY_REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry::new());
+        &EMPTY_REGISTRY
+    }))
 }
 
 /// Unpin and remove all FFI-bridged objects (called during GC sweep).

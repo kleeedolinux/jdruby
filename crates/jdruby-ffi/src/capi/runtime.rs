@@ -894,7 +894,7 @@ pub extern "C" fn jdruby_cvar_set_dynamic(class: VALUE, name: VALUE, value: VALU
 
 /// Dynamic const get (actual implementation).
 #[no_mangle]
-pub extern "C" fn jdruby_const_get_dynamic(class: VALUE, name: VALUE, inherit: bool) -> VALUE {
+pub extern "C" fn jdruby_const_get_dynamic(_class: VALUE, name: VALUE, inherit: bool) -> VALUE {
     let const_name = value_to_symbol_or_string(name).unwrap_or("".to_string());
     if const_name.is_empty() { return RUBY_QNIL; }
     
@@ -922,7 +922,7 @@ pub extern "C" fn jdruby_const_set_dynamic(class: VALUE, name: VALUE, value: VAL
 #[no_mangle]
 pub unsafe extern "C" fn jdruby_method_missing(obj: VALUE, name: VALUE, argc: i32, argv: *const VALUE, _block: VALUE) -> VALUE {
     if obj == RUBY_QNIL { return RUBY_QNIL; }
-    let method_name = value_to_symbol_or_string(name).unwrap_or("method_missing".to_string());
+    let _method_name = value_to_symbol_or_string(name).unwrap_or("method_missing".to_string());
     
     let args: Vec<VALUE> = if argc > 0 && !argv.is_null() {
         std::slice::from_raw_parts(argv, argc as usize).to_vec()

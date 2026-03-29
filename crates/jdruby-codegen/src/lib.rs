@@ -7,6 +7,13 @@ pub mod instructions;
 pub mod runtime;
 pub mod utils;
 
+// New modular codegen system
+pub mod ir;
+pub mod register;
+pub mod constants;
+pub mod selection;
+pub mod optimize;
+
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{TargetMachine, TargetTriple};

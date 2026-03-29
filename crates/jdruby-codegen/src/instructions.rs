@@ -253,6 +253,9 @@ fn emit_instruction<'ctx>(
         MirInst::DefMethod(class_reg, method_name, func_name) => {
             emit_def_method(*class_reg, method_name, func_name, ctx, llvm_ctx, module, builder, reg_map)?;
         }
+        MirInst::DefSingletonMethod(obj_reg, method_name, func_name) => {
+            emit_def_singleton_method(*obj_reg, method_name, func_name, ctx, llvm_ctx, module, builder, reg_map)?;
+        }
         MirInst::IncludeModule(class_reg, module_name) => {
             emit_include_module(*class_reg, module_name, ctx, llvm_ctx, module, builder, reg_map)?;
         }
@@ -414,6 +417,14 @@ fn emit_instruction<'ctx>(
         // =========================================================================
         MirInst::MethodMissing { dest, obj_reg, name_reg, args, block_reg } => {
             let val = emit_method_missing(*obj_reg, *name_reg, args, *block_reg, ctx, llvm_ctx, module, builder, reg_map)?;
+            reg_map.insert(*dest, val);
+        }
+        MirInst::BlockInvoke { dest, block_reg, args, splat_arg, block_arg } => {
+            let val = emit_block_invoke(*block_reg, args, *splat_arg, *block_arg, ctx, llvm_ctx, module, builder, reg_map)?;
+            reg_map.insert(*dest, val);
+        }
+        MirInst::SendWithIC { dest, obj_reg, method_name, args, block_reg, cache_slot } => {
+            let val = emit_send_with_ic(*obj_reg, method_name, args, *block_reg, *cache_slot, ctx, llvm_ctx, module, builder, reg_map)?;
             reg_map.insert(*dest, val);
         }
     }
@@ -1113,6 +1124,55 @@ fn emit_def_method<'ctx>(
     
     let fn_val = get_runtime_fn_value(module, "jdruby_def_method").unwrap();
     builder.build_call(fn_val, &[class_val.into(), meth_name_ptr.into(), func_name_ptr.into()], "").unwrap();
+    
+    Ok(())
+}
+
+fn emit_def_singleton_method<'ctx>(
+    obj_reg: u32,
+    method_name: &str,
+    func_name: &str,
+    _ctx: &CodegenContext<'ctx>,
+    llvm_ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    builder: &Builder<'ctx>,
+    reg_map: &RegMap<'ctx>,
+) -> Result<(), Vec<Diagnostic>> {
+    let i64_type = llvm_ctx.i64_type();
+    let i8_type = llvm_ctx.i8_type();
+    
+    let obj_val = reg_map.get(&obj_reg).copied().unwrap_or(i64_type.const_int(0, false).into());
+    
+    // Method name with unique suffix
+    let meth_len = method_name.len();
+    let meth_array_type = i8_type.array_type((meth_len + 1) as u32);
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let meth_global = module.add_global(meth_array_type, None, &format!("def_singleton_meth_name_{}", counter));
+    meth_global.set_linkage(inkwell::module::Linkage::Private);
+    let mut meth_bytes: Vec<_> = method_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
+    meth_bytes.push(i8_type.const_int(0, false));
+    meth_global.set_initializer(&i8_type.const_array(&meth_bytes));
+    
+    let meth_ptr = meth_global.as_pointer_value();
+    let zero = llvm_ctx.i64_type().const_int(0, false);
+    let meth_name_ptr = unsafe { builder.build_gep(meth_array_type, meth_ptr, &[zero, zero], "singleton_meth_name_ptr").unwrap() };
+    
+    // Function name with unique suffix - sanitize the function name for LLVM
+    let sanitized_func_name = sanitize_name(func_name);
+    let func_len = sanitized_func_name.len();
+    let func_array_type = i8_type.array_type((func_len + 1) as u32);
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let func_global = module.add_global(func_array_type, None, &format!("def_singleton_func_name_{}", counter));
+    func_global.set_linkage(inkwell::module::Linkage::Private);
+    let mut func_bytes: Vec<_> = sanitized_func_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
+    func_bytes.push(i8_type.const_int(0, false));
+    func_global.set_initializer(&i8_type.const_array(&func_bytes));
+    
+    let func_ptr = func_global.as_pointer_value();
+    let func_name_ptr = unsafe { builder.build_gep(func_array_type, func_ptr, &[zero, zero], "singleton_func_name_ptr").unwrap() };
+    
+    let fn_val = get_runtime_fn_value(module, "jdruby_def_singleton_method").unwrap();
+    builder.build_call(fn_val, &[obj_val.into(), meth_name_ptr.into(), func_name_ptr.into()], "").unwrap();
     
     Ok(())
 }
@@ -2045,5 +2105,96 @@ fn emit_method_missing<'ctx>(
     
     let fn_val = get_runtime_fn_value(module, "jdruby_method_missing").unwrap();
     let val = builder.build_call(fn_val, &[obj_val.into(), name_val.into(), argc_val.into(), argv_ptr.into(), block_val.into()], "method_missing").unwrap();
+    Ok(val.try_as_basic_value().unwrap_basic())
+}
+
+fn emit_block_invoke<'ctx>(
+    block_reg: u32,
+    args: &[u32],
+    splat_arg: Option<u32>,
+    block_arg: Option<u32>,
+    _ctx: &CodegenContext<'ctx>,
+    llvm_ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    builder: &Builder<'ctx>,
+    reg_map: &RegMap<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+    let i64_type = llvm_ctx.i64_type();
+    let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
+    let block_val = reg_map.get(&block_reg).copied().unwrap_or(i64_type.const_int(0, false).into());
+    let splat_val = splat_arg.and_then(|r| reg_map.get(&r).copied()).unwrap_or(i64_type.const_int(0, false).into());
+    let block_arg_val = block_arg.and_then(|r| reg_map.get(&r).copied()).unwrap_or(i64_type.const_int(0, false).into());
+    
+    let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
+    let argv_ptr = if args.is_empty() {
+        i64_ptr_type.const_null()
+    } else {
+        let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "invoke_argv").unwrap();
+        let zero = llvm_ctx.i64_type().const_int(0, false);
+        for (i, &arg) in args.iter().enumerate() {
+            let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+            let idx = i64_type.const_int(i as u64, false);
+            let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("invoke_arg_{}", i)).unwrap() };
+            builder.build_store(elem_ptr, arg_val).unwrap();
+        }
+        unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "invoke_argv_ptr").unwrap() }
+    };
+    
+    let fn_val = get_runtime_fn_value(module, "jdruby_block_invoke").unwrap();
+    let val = builder.build_call(fn_val, &[block_val.into(), argc_val.into(), argv_ptr.into(), splat_val.into(), block_arg_val.into()], "block_invoke").unwrap();
+    Ok(val.try_as_basic_value().unwrap_basic())
+}
+
+fn emit_send_with_ic<'ctx>(
+    obj_reg: u32,
+    method_name: &str,
+    args: &[u32],
+    block_reg: Option<u32>,
+    cache_slot: u32,
+    _ctx: &CodegenContext<'ctx>,
+    llvm_ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    builder: &Builder<'ctx>,
+    reg_map: &RegMap<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+    let i64_type = llvm_ctx.i64_type();
+    let i64_ptr_type = llvm_ctx.ptr_type(AddressSpace::default());
+    let i8_type = llvm_ctx.i8_type();
+    let obj_val = reg_map.get(&obj_reg).copied().unwrap_or(i64_type.const_int(0, false).into());
+    let block_val = block_reg.and_then(|r| reg_map.get(&r).copied()).unwrap_or(i64_type.const_int(0, false).into());
+    
+    // Create method name string
+    let method_len = method_name.len();
+    let method_array_type = i8_type.array_type((method_len + 1) as u32);
+    let counter = GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let method_global = module.add_global(method_array_type, None, &format!("method_name_{}", counter));
+    method_global.set_linkage(inkwell::module::Linkage::Private);
+    let mut method_bytes: Vec<_> = method_name.bytes().map(|b| i8_type.const_int(b as u64, false)).collect();
+    method_bytes.push(i8_type.const_int(0, false));
+    method_global.set_initializer(&i8_type.const_array(&method_bytes));
+    
+    let zero = llvm_ctx.i64_type().const_int(0, false);
+    let method_ptr = method_global.as_pointer_value();
+    let method_name_ptr = unsafe { builder.build_gep(method_array_type, method_ptr, &[zero, zero], "method_name_ptr").unwrap() };
+    
+    let cache_val = llvm_ctx.i32_type().const_int(cache_slot as u64, false);
+    
+    let argc_val = llvm_ctx.i32_type().const_int(args.len() as u64, false);
+    let argv_ptr = if args.is_empty() {
+        i64_ptr_type.const_null()
+    } else {
+        let argv_alloca = builder.build_alloca(i64_type.array_type(args.len() as u32), "send_ic_argv").unwrap();
+        let zero = llvm_ctx.i64_type().const_int(0, false);
+        for (i, &arg) in args.iter().enumerate() {
+            let arg_val = reg_map.get(&arg).copied().unwrap_or(i64_type.const_int(0, false).into());
+            let idx = i64_type.const_int(i as u64, false);
+            let elem_ptr = unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, idx], &format!("send_ic_arg_{}", i)).unwrap() };
+            builder.build_store(elem_ptr, arg_val).unwrap();
+        }
+        unsafe { builder.build_gep(i64_type.array_type(args.len() as u32), argv_alloca, &[zero, zero], "send_ic_argv_ptr").unwrap() }
+    };
+    
+    let fn_val = get_runtime_fn_value(module, "jdruby_send_with_ic").unwrap();
+    let val = builder.build_call(fn_val, &[obj_val.into(), method_name_ptr.into(), argc_val.into(), argv_ptr.into(), block_val.into(), cache_val.into()], "send_with_ic").unwrap();
     Ok(val.try_as_basic_value().unwrap_basic())
 }

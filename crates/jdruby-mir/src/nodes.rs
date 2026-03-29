@@ -54,6 +54,8 @@ pub enum MirInst {
     SingletonClassGet(RegId, RegId),
     /// Register a method on a class: def_method(class_reg, method_name, func_name)
     DefMethod(RegId, String, String),
+    /// Register a singleton method on an object: def_singleton_method(obj_reg, method_name, func_name)
+    DefSingletonMethod(RegId, String, String),
     /// Include a module into a class: include_module(class_reg, module_name)
     IncludeModule(RegId, String),
     /// Prepend a module into a class: prepend_module(class_reg, module_name)
