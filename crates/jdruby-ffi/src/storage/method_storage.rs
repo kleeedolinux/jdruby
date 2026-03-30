@@ -3,8 +3,8 @@
 //! Stores method entries keyed by (class, method_name) with hierarchy traversal.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
-use crate::core::VALUE;
+use parking_lot::RwLock;
+use crate::core::{VALUE, RUBY_QNIL, RUBY_QTRUE, RUBY_QFALSE};
 use super::class_table::with_class_table;
 
 /// Visibility enum for method definitions
@@ -14,6 +14,44 @@ pub enum Visibility {
     Public = 0,
     Protected = 1,
     Private = 2,
+}
+
+/// Get the class of an object (instance).
+/// For now, we use a simple heuristic based on the object VALUE.
+/// In a full implementation, objects would store their class in their RBasic header.
+pub fn object_class(obj: VALUE) -> VALUE {
+    // Immediate values have fixed classes
+    if obj == RUBY_QNIL {
+        // Return Object class for nil
+        return with_class_table(|tbl| tbl.class_by_name("Object")).unwrap_or(0);
+    }
+    if obj == RUBY_QTRUE || obj == RUBY_QFALSE {
+        return with_class_table(|tbl| tbl.class_by_name("Boolean")).unwrap_or(0);
+    }
+    
+    // Check if this looks like a fixnum
+    use crate::core::rb_fixnum_p;
+    if rb_fixnum_p(obj) {
+        return with_class_table(|tbl| tbl.class_by_name("Integer")).unwrap_or(0);
+    }
+    
+    // For heap objects, we need to track their class
+    // Check if the VALUE itself is a known class (for class method calls)
+    let is_class = with_class_table(|tbl| tbl.is_class(obj));
+    if is_class {
+        // For class objects, methods are defined on their singleton class
+        // Return the singleton class for method lookup
+        return with_class_table(|tbl| tbl.singleton_class(obj)).unwrap_or(obj);
+    }
+    
+    // Try to get class from registry (where heap objects store their klass)
+    use crate::bridge::registry::with_registry;
+    with_registry(|registry| {
+        registry.get_class(obj)
+    }).unwrap_or_else(|| {
+        // Fallback: return Object class
+        with_class_table(|tbl| tbl.class_by_name("Object")).unwrap_or(0)
+    })
 }
 
 /// Global method storage.
@@ -30,6 +68,8 @@ pub struct MethodEntry {
     pub name: String,
     /// The class VALUE this method belongs to.
     pub klass: VALUE,
+    /// Block captures for methods defined via define_method (stores captured variables)
+    pub block_captures: Option<Vec<VALUE>>,
 }
 
 /// Stores method definitions keyed by (class, method_name).
@@ -52,6 +92,7 @@ impl MethodStorage {
             arity,
             name: name.to_string(),
             klass,
+            block_captures: None,
         };
         self.methods.insert((klass, name.to_string()), entry);
     }
@@ -96,6 +137,19 @@ impl MethodStorage {
             arity: -1, // Variable arity
             name: name.to_string(),
             klass,
+            block_captures: None,
+        };
+        self.methods.insert((klass, name.to_string()), entry);
+    }
+
+    /// Define method with block captures (for define_method with block)
+    pub fn define_method_with_block(&mut self, klass: VALUE, name: &str, func_name: &str, captures: Vec<VALUE>) {
+        let entry = MethodEntry {
+            func_name: func_name.to_string(),
+            arity: -1, // Variable arity
+            name: name.to_string(),
+            klass,
+            block_captures: Some(captures),
         };
         self.methods.insert((klass, name.to_string()), entry);
     }
@@ -119,6 +173,7 @@ impl MethodStorage {
                 arity: old_entry.arity,
                 name: new_name.to_string(),
                 klass,
+                block_captures: old_entry.block_captures.clone(),
             };
             self.methods.insert((klass, new_name.to_string()), new_entry);
         }
@@ -130,15 +185,51 @@ impl MethodStorage {
         // For now, visibility is not enforced
     }
 
-    /// Dispatch method call
+    /// Dispatch method call - releases lock before calling to avoid reentrancy deadlock
     pub fn dispatch(&self, obj: VALUE, name: &str, args: &[VALUE]) -> VALUE {
-        // Look up method and call it
-        if let Some(entry) = self.lookup(obj, name) {
+        // Get the class of the object for method lookup
+        let klass = object_class(obj);
+        eprintln!("DEBUG: MethodStorage::dispatch obj={}, class={}, method='{}'", obj, klass, name);
+        
+        // Look up method first
+        let entry_opt = self.lookup(klass, name).cloned();
+        
+        if let Some(entry) = entry_opt {
+            eprintln!("DEBUG: MethodStorage::dispatch found method '{}' -> '{}' (captures: {})", 
+                name, entry.func_name,
+                entry.block_captures.as_ref().map(|v| v.len()).unwrap_or(0));
+            // CRITICAL: Release the METHOD_STORAGE lock before calling the method
+            // to allow reentrant calls (e.g., define_method calling send_dynamic)
+            drop(self); // Explicitly drop the &self reference (we're not holding the lock directly)
+            
             unsafe {
                 use crate::capi::class::dispatch_c_method;
-                dispatch_c_method(&entry.func_name, entry.arity, obj, args)
+                use crate::bridge::registry::get_global_bridge;
+                
+                // CRITICAL FIX: Prepend block captures to args for methods defined with blocks
+                let full_args = if let Some(ref captures) = entry.block_captures {
+                    let mut combined = captures.clone();
+                    combined.extend(args.iter().cloned());
+                    eprintln!("DEBUG: MethodStorage::dispatch - prepending {} captures, total args: {}", 
+                        captures.len(), combined.len());
+                    combined
+                } else {
+                    args.to_vec()
+                };
+                
+                // Set current self before dispatch
+                if let Some(bridge) = get_global_bridge() {
+                    bridge.set_current_self(Some(obj));
+                }
+                let result = dispatch_c_method(&entry.func_name, entry.arity, obj, &full_args);
+                // Clear current self after dispatch (restore to None for top-level)
+                if let Some(bridge) = get_global_bridge() {
+                    bridge.set_current_self(None);
+                }
+                result
             }
         } else {
+            eprintln!("DEBUG: MethodStorage::dispatch method '{}' not found for class {}", name, klass);
             0 // RUBY_QNIL equivalent
         }
     }
@@ -149,9 +240,10 @@ impl MethodStorage {
         self.dispatch(obj, name, args)
     }
 
-    /// Check if method exists
+    /// Check if method exists (on object's class)
     pub fn has_method(&self, obj: VALUE, name: &str) -> bool {
-        self.lookup(obj, name).is_some()
+        let klass = object_class(obj);
+        self.lookup(klass, name).is_some()
     }
 
     /// Extract method name from Method object
@@ -189,7 +281,10 @@ pub fn with_method_storage<F, R>(f: F) -> R
 where
     F: FnOnce(&mut MethodStorage) -> R,
 {
-    let mut guard = METHOD_STORAGE.write().unwrap();
-    let storage = guard.get_or_insert_with(MethodStorage::new);
-    f(storage)
+    let mut guard = METHOD_STORAGE.write();
+    // parking_lot RwLock doesn't poison, guard is not a Result
+    if guard.is_none() {
+        *guard = Some(MethodStorage::new());
+    }
+    f(guard.as_mut().unwrap())
 }

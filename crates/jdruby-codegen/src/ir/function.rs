@@ -162,10 +162,15 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
         if let Some(&ptr) = self.local_vars.get(name) {
             return ptr;
         }
-        // Create new alloca for this local variable
+        // Create new alloca for this local variable with 8-byte alignment for i64
         let i64_type = self.llvm_context.i64_type();
         let ptr = builder.build_alloca(i64_type, &format!("var_{}", name))
             .expect("Failed to build alloca for local variable");
+        // Set 8-byte alignment for i64 values
+        ptr.as_instruction()
+            .expect("Alloca is an instruction")
+            .set_alignment(8)
+            .expect("Failed to set alignment");
         self.local_vars.insert(name.to_string(), ptr);
         ptr
     }

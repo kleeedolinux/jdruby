@@ -65,7 +65,14 @@ pub unsafe fn dispatch_c_method(func_name: &str, arity: i32, recv: VALUE, args: 
     }
     let actual_func_ptr = symbol as usize;
     
-    match arity {
+    // Handle variable arity (-1) by using the actual number of args provided
+    let effective_arity = if arity == -1 {
+        args.len() as i32
+    } else {
+        arity
+    };
+    
+    match effective_arity {
         0 => std::mem::transmute::<usize, extern "C" fn(VALUE) -> VALUE>(actual_func_ptr)(recv),
         1 => {
             let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE) -> VALUE>(actual_func_ptr);
@@ -79,6 +86,9 @@ pub unsafe fn dispatch_c_method(func_name: &str, arity: i32, recv: VALUE, args: 
             let f = std::mem::transmute::<usize, extern "C" fn(VALUE, VALUE, VALUE, VALUE) -> VALUE>(actual_func_ptr);
             f(recv, args.first().copied().unwrap_or(RUBY_QNIL), args.get(1).copied().unwrap_or(RUBY_QNIL), args.get(2).copied().unwrap_or(RUBY_QNIL))
         }
-        _ => RUBY_QNIL,
+        _ => {
+            eprintln!("DEBUG: Unsupported arity {} for function {}", effective_arity, func_name);
+            RUBY_QNIL
+        }
     }
 }

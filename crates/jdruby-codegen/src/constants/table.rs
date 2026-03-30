@@ -49,8 +49,8 @@ pub mod ruby_consts {
     /// Fixnum tag (values are shifted left 1 and OR'd with 1).
     pub const FIXNUM_TAG: i64 = 1;
 
-    /// Symbol tag (values end with 0x0e).
-    pub const SYMBOL_TAG: i64 = 0x0e;
+    /// Symbol tag (values end with 0x0c to match RUBY_SYMBOL_FLAG).
+    pub const SYMBOL_TAG: i64 = 0x0c;
 
     /// Tag mask for immediate type checking.
     pub const IMMEDIATE_MASK: i64 = 0x07;
@@ -156,8 +156,8 @@ impl<'ctx, 'm> ConstantTable<'ctx, 'm> {
         let id = self.next_symbol_id;
         self.next_symbol_id += 1;
 
-        // Tag the ID (symbols end with 0x0e)
-        let tagged = (id << 4) | 0x0e;
+        // Tag the ID (symbols use (id << 8) | 0x0c to match RUBY_SYMBOL_FLAG)
+        let tagged = (id << 8) | 0x0c;
         let val = self.context.i64_type().const_int(tagged, false);
 
         self.symbols.insert(name.to_string(), val.into());

@@ -179,6 +179,7 @@ pub struct HirBlock {
     pub params: Vec<HirBlockParam>,
     pub body: Vec<HirNode>,
     pub captured_vars: Vec<String>,
+    pub captures_self: bool,
 }
 
 #[derive(Debug, Clone)]

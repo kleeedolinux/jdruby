@@ -56,8 +56,15 @@ impl HirLowering {
             if let HirNode::ClassDef(cls) = node {
                 for cn in &cls.body {
                     if let HirNode::FuncDef(def) = cn {
-                        let qualified = format!("{}#{}", cls.name, def.name);
-                        // Add implicit `self` parameter for instance methods
+                        // For class methods (def self.xxx), use . separator and still add self param
+                        // For instance methods, use # separator and add self param (the instance)
+                        let qualified = if def.is_class_method {
+                            format!("{}.{}", cls.name, def.name)
+                        } else {
+                            format!("{}#{}", cls.name, def.name)
+                        };
+                        // Add implicit `self` parameter for both instance and class methods
+                        // For class methods, self is the class object; for instance methods, self is the instance
                         let mut params = vec!["self".to_string()];
                         params.extend(def.params.iter().cloned());
                         let body_refs: Vec<&HirNode> = def.body.iter().collect();
@@ -95,11 +102,14 @@ impl HirLowering {
             reg
         }).collect();
         
-        // If method yields OR calls define_method, add implicit block parameter
+        // If method yields OR calls define_method, get the implicit block via CurrentBlock
+        // and store it as local variable "block" for yield to access
+        let has_yield = body.iter().any(|node| contains_yield(node));
+        let calls_define_method = body.iter().any(|node| contains_define_method(node));
         if has_yield || calls_define_method {
             let block_reg = self.alloc_reg();
+            self.emit(MirInst::CurrentBlock { dest: block_reg });
             self.emit(MirInst::Store("block".to_string(), block_reg));
-            param_regs.push(block_reg);
         }
 
         // Lower body
@@ -138,16 +148,34 @@ impl HirLowering {
                     HirLiteralValue::Bool(v) => MirConst::Bool(*v),
                     HirLiteralValue::Nil => MirConst::Nil,
                     HirLiteralValue::Array(elems) => {
+                        // First lower all element expressions
                         let elem_regs: Vec<RegId> = elems.iter().map(|e| self.lower_node(e)).collect();
-                        self.emit(MirInst::Call(reg, "rb_ary_new".into(), elem_regs));
-                        return reg;
+                        // Create empty array first
+                        let array_reg = self.alloc_reg();
+                        self.emit(MirInst::Call(array_reg, "jdruby_ary_new_empty".into(), vec![]));
+                        // Then push each element
+                        for elem_reg in elem_regs {
+                            self.emit(MirInst::Call(array_reg, "jdruby_ary_push".into(), vec![array_reg, elem_reg]));
+                        }
+                        return array_reg;
                     }
                     HirLiteralValue::Hash(entries) => {
+                        // First lower all key-value pairs
                         let entry_regs: Vec<RegId> = entries.iter().flat_map(|(k, v)| {
                             vec![self.lower_node(k), self.lower_node(v)]
                         }).collect();
-                        self.emit(MirInst::Call(reg, "rb_hash_new".into(), entry_regs));
-                        return reg;
+                        // Create empty hash first
+                        let hash_reg = self.alloc_reg();
+                        self.emit(MirInst::Call(hash_reg, "jdruby_hash_new_empty".into(), vec![]));
+                        // Then set each key-value pair
+                        let mut i = 0;
+                        while i < entry_regs.len() {
+                            let key_reg = entry_regs[i];
+                            let val_reg = entry_regs[i + 1];
+                            self.emit(MirInst::Call(hash_reg, "jdruby_hash_set".into(), vec![hash_reg, key_reg, val_reg]));
+                            i += 2;
+                        }
+                        return hash_reg;
                     }
                 };
                 self.emit(MirInst::LoadConst(reg, c));
@@ -178,54 +206,126 @@ impl HirLowering {
                 reg
             }
             HirNode::Call(call) => {
-                // Process all arguments normally - symbols are regular args, not blocks
-                let processed_args: Vec<RegId> = call.args.iter()
-                    .map(|arg| self.lower_node(arg))
-                    .collect();
+                // Process arguments, but detect block pass (symbol literals that represent &:sym)
+                // ONLY convert symbol to block if explicitly marked as a block in HIR (call.block is Some)
+                // or if the HIR node itself indicates it's a block pass
+                let mut processed_args: Vec<RegId> = Vec::new();
+                let mut block_reg: Option<RegId> = None;
                 
-                // Use block from call.block if present
-                let block_reg = if let Some(ref block) = call.block {
-                    // Create block function from the body
-                    let func_symbol = format!("block_in_{}_{}", call.method, self.next_reg);
-                    let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
-                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &block.captured_vars);
-                    self.block_functions.push(block_func);
+                // First check if there's an explicit block in the call
+                let has_explicit_block = call.block.is_some();
+                
+                for arg in &call.args {
+                    // Check if this argument is a block pass - only if:
+                    // 1. There's an explicit block in HIR, OR
+                    // 2. The argument node itself is marked as a block pass (not just a symbol literal)
+                    // In Ruby, `&:run` syntax should be parsed into call.block, not call.args
+                    // If a symbol literal ends up in args without explicit block marking, 
+                    // it should be treated as a positional argument
+                    let is_block_pass_symbol = matches!(
+                        arg, 
+                        HirNode::Literal(lit) if matches!(&lit.value, HirLiteralValue::Symbol(_))
+                    );
                     
-                    // Load captured variables from the HIR block
-                    let captured_regs: Vec<RegId> = block.captured_vars.iter()
-                        .map(|name| {
+                    // Only treat symbol as block pass if there's explicit block context
+                    // or if the call's block field contains this symbol
+                    let should_convert_to_block = is_block_pass_symbol 
+                        && block_reg.is_none() 
+                        && has_explicit_block
+                        && is_symbol_block_arg(arg, call.block.as_ref());
+                    
+                    if should_convert_to_block {
+                        // Convert symbol to proc and use as block
+                        if let HirNode::Literal(lit) = arg {
+                            if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                let sym_reg = self.alloc_reg();
+                                self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                let proc_reg = self.alloc_reg();
+                                self.emit(MirInst::SymbolToProc { dest: proc_reg, symbol_reg: sym_reg });
+                                block_reg = Some(proc_reg);
+                            } else {
+                                processed_args.push(self.lower_node(arg));
+                            }
+                        } else {
+                            processed_args.push(self.lower_node(arg));
+                        }
+                    } else {
+                        processed_args.push(self.lower_node(arg));
+                    }
+                }
+                
+                // If we didn't find a block pass in args, check the explicit block field
+                if block_reg.is_none() {
+                    if let Some(ref block) = call.block {
+                        // Check if this is &:sym syntax (block body is a single symbol literal)
+                        let is_symbol_proc = block.body.len() == 1 &&
+                            matches!(&block.body[0], HirNode::Literal(lit) if matches!(&lit.value, HirLiteralValue::Symbol(_)));
+                        
+                        if is_symbol_proc {
+                            // Handle &:sym syntax - convert symbol to proc
+                            if let HirNode::Literal(lit) = &block.body[0] {
+                                if let HirLiteralValue::Symbol(sym_name) = &lit.value {
+                                    let sym_reg = self.alloc_reg();
+                                    self.emit(MirInst::LoadConst(sym_reg, MirConst::Symbol(sym_name.clone())));
+                                    let proc_reg = self.alloc_reg();
+                                    self.emit(MirInst::SymbolToProc { dest: proc_reg, symbol_reg: sym_reg });
+                                    block_reg = Some(proc_reg);
+                                }
+                            } else {
+                                unreachable!()
+                            }
+                        } else if !block.body.is_empty() {
+                            // Create block function from the body (handles both single and multi-expression blocks)
+                            let func_symbol = format!("block_in_{}_{}", call.method, self.next_reg);
+                            let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
+                            
+                            // Check if block captures self and add to captured_vars if needed
+                            // But don't add if self is already the first captured var (common case)
+                            let mut effective_captured_vars = block.captured_vars.clone();
+                            if block.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                                effective_captured_vars.insert(0, "self".to_string());
+                            }
+                            
+                            let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &effective_captured_vars);
+                            self.block_functions.push(block_func);
+                            
+                            // Load captured variables from the HIR block
+                            let captured_regs: Vec<RegId> = effective_captured_vars.iter()
+                                .map(|name| {
+                                    let reg = self.alloc_reg();
+                                    self.emit(MirInst::Load(reg, name.clone()));
+                                    reg
+                                })
+                                .collect();
+                            
+                            // Create block object
                             let reg = self.alloc_reg();
-                            self.emit(MirInst::Load(reg, name.clone()));
-                            reg
-                        })
-                        .collect();
-                    
-                    // Create block object
-                    let reg = self.alloc_reg();
-                    self.emit(MirInst::BlockCreate {
-                        dest: reg,
-                        func_symbol,
-                        captured_vars: captured_regs,
-                        is_lambda: false,
-                    });
-                    Some(reg)
-                } else {
-                    // Use implicit block if available
-                    self.current_block
-                };
+                            self.emit(MirInst::BlockCreate {
+                                dest: reg,
+                                func_symbol,
+                                captured_vars: captured_regs,
+                                is_lambda: false,
+                            });
+                            block_reg = Some(reg);
+                        } else {
+                            // Empty block body - use implicit block if available
+                            block_reg = self.current_block;
+                        }
+                    } else {
+                        // No explicit block - use implicit block if available
+                        block_reg = self.current_block;
+                    }
+                }
                 
                 let reg = self.alloc_reg();
                 if let Some(recv) = &call.receiver {
                     let recv_reg = self.lower_node(recv);
                     
-                    // If block is present, use Send which supports blocks
+                    // If block is present, use MethodCall with block support
                     if let Some(block) = block_reg {
-                        // Load method name as a value (symbol)
-                        let method_reg = self.alloc_reg();
-                        self.emit(MirInst::LoadConst(method_reg, MirConst::Symbol(call.method.clone())));
-                        self.emit(MirInst::Send { dest: reg, obj_reg: recv_reg, name_reg: method_reg, args: processed_args, block_reg: Some(block) });
+                        self.emit(MirInst::MethodCall(reg, recv_reg, call.method.clone(), processed_args, Some(block)));
                     } else {
-                        self.emit(MirInst::MethodCall(reg, recv_reg, call.method.clone(), processed_args));
+                        self.emit(MirInst::MethodCall(reg, recv_reg, call.method.clone(), processed_args, None));
                     }
                 } else {
                     // No receiver - this is a function call (not a method call)
@@ -326,14 +426,47 @@ impl HirLowering {
                 for node in &cls.body {
                     match node {
                         HirNode::FuncDef(def) => {
-                            let qualified = format!("{}#{}", cls.name, def.name);
-                            self.emit(MirInst::DefMethod(class_reg, def.name.clone(), qualified));
+                            // For class methods (def self.xxx), use . separator
+                            // For instance methods, use # separator
+                            let qualified = if def.is_class_method {
+                                format!("{}.{}", cls.name, def.name)
+                            } else {
+                                format!("{}#{}", cls.name, def.name)
+                            };
+                            if def.is_class_method {
+                                // For class methods (def self.xxx), define on the singleton class
+                                let singleton_reg = self.alloc_reg();
+                                self.emit(MirInst::SingletonClassGet(singleton_reg, class_reg));
+                                self.emit(MirInst::DefMethod(singleton_reg, def.name.clone(), qualified));
+                            } else {
+                                // For instance methods, define on the class itself
+                                self.emit(MirInst::DefMethod(class_reg, def.name.clone(), qualified));
+                            }
                         }
                         HirNode::Call(call) => {
-                            if call.method == "include" {
-                                if let Some(HirNode::VarRef(v)) = call.args.first() {
-                                    self.emit(MirInst::IncludeModule(class_reg, v.name.clone()));
+                            match call.method.as_str() {
+                                "include" => {
+                                    // Lower the module expression (could be VarRef, method call, etc.)
+                                    if let Some(first_arg) = call.args.first() {
+                                        let module_reg = self.lower_node(first_arg);
+                                        self.emit(MirInst::IncludeModule(class_reg, module_reg));
+                                    }
                                 }
+                                "prepend" => {
+                                    // Lower the module expression
+                                    if let Some(first_arg) = call.args.first() {
+                                        let module_reg = self.lower_node(first_arg);
+                                        self.emit(MirInst::PrependModule(class_reg, module_reg));
+                                    }
+                                }
+                                "extend" => {
+                                    // Lower the module expression
+                                    if let Some(first_arg) = call.args.first() {
+                                        let module_reg = self.lower_node(first_arg);
+                                        self.emit(MirInst::ExtendModule(class_reg, module_reg));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
@@ -395,11 +528,19 @@ impl HirLowering {
             HirNode::BlockDef(block_def) => {
                 // Create the block function from the body
                 let func_symbol = format!("block_{}_{}", self.current_blocks.len(), self.next_reg);
-                let block_func = self.lower_block_function(&func_symbol, &block_def.params, &block_def.body, &block_def.captured_vars);
+                
+                // Check if block captures self and add to captured_vars if needed
+                // But don't add if self is already the first captured var (common case)
+                let mut effective_captured_vars = block_def.captured_vars.clone();
+                if block_def.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                    effective_captured_vars.insert(0, "self".to_string());
+                }
+                
+                let block_func = self.lower_block_function(&func_symbol, &block_def.params, &block_def.body, &effective_captured_vars);
                 self.block_functions.push(block_func);
 
                 // Load captured variables
-                let captured_regs: Vec<RegId> = block_def.captured_vars.iter()
+                let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
                         self.emit(MirInst::Load(reg, name.clone()));
@@ -424,11 +565,19 @@ impl HirLowering {
             HirNode::ProcDef(proc_def) => {
                 // Create the proc function from the body
                 let func_symbol = format!("proc_{}_{}", self.current_blocks.len(), self.next_reg);
-                let proc_func = self.lower_block_function(&func_symbol, &proc_def.params, &proc_def.body, &proc_def.captured_vars);
+                
+                // Check if block captures self and add to captured_vars if needed
+                // But don't add if self is already the first captured var (common case)
+                let mut effective_captured_vars = proc_def.captured_vars.clone();
+                if proc_def.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                    effective_captured_vars.insert(0, "self".to_string());
+                }
+                
+                let proc_func = self.lower_block_function(&func_symbol, &proc_def.params, &proc_def.body, &effective_captured_vars);
                 self.block_functions.push(proc_func);
 
                 // Load captured variables
-                let captured_regs: Vec<RegId> = proc_def.captured_vars.iter()
+                let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
                         self.emit(MirInst::Load(reg, name.clone()));
@@ -453,11 +602,19 @@ impl HirLowering {
             HirNode::LambdaDef(lambda_def) => {
                 // Create the lambda function from the body
                 let func_symbol = format!("lambda_{}_{}", self.current_blocks.len(), self.next_reg);
-                let lambda_func = self.lower_block_function(&func_symbol, &lambda_def.params, &lambda_def.body, &lambda_def.captured_vars);
+                
+                // Check if block captures self and add to captured_vars if needed
+                // But don't add if self is already the first captured var (common case)
+                let mut effective_captured_vars = lambda_def.captured_vars.clone();
+                if lambda_def.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                    effective_captured_vars.insert(0, "self".to_string());
+                }
+                
+                let lambda_func = self.lower_block_function(&func_symbol, &lambda_def.params, &lambda_def.body, &effective_captured_vars);
                 self.block_functions.push(lambda_func);
 
                 // Load captured variables
-                let captured_regs: Vec<RegId> = lambda_def.captured_vars.iter()
+                let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                     .map(|name| {
                         let reg = self.alloc_reg();
                         self.emit(MirInst::Load(reg, name.clone()));
@@ -508,15 +665,55 @@ impl HirLowering {
                     });
                 let name_reg = self.lower_node(&def.name);
                 let reg = self.alloc_reg();
-                let method_func = format!("method_{}_{}", self.current_blocks.len(), reg);
                 let visibility = def.visibility.map(|v| self.convert_visibility(v))
                     .unwrap_or(MirVisibility::Public);
+                
+                // Properly handle the body for define_method
+                // The body (HirBlockDef) becomes the method body
+                let func_symbol = format!("method_body_{}_{}", self.current_blocks.len(), self.next_reg);
+                let body_cloned: Vec<HirNode> = def.body.body.iter().cloned().collect();
+                
+                // Check if block captures self
+                // But don't add if self is already the first captured var (common case)
+                let mut effective_captured_vars = def.body.captured_vars.clone();
+                if def.body.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                    effective_captured_vars.insert(0, "self".to_string());
+                }
+                
+                // Create the block function that will serve as method body
+                let block_func = self.lower_block_function(&func_symbol, &def.body.params, &body_cloned, &effective_captured_vars);
+                self.block_functions.push(block_func);
+                
+                // Load captured variables
+                let captured_regs: Vec<RegId> = effective_captured_vars.iter()
+                    .map(|name| {
+                        let reg = self.alloc_reg();
+                        self.emit(MirInst::Load(reg, name.clone()));
+                        reg
+                    })
+                    .collect();
+                
+                // Create block object
+                let block_reg = self.alloc_reg();
+                self.emit(MirInst::BlockCreate {
+                    dest: block_reg,
+                    func_symbol: func_symbol.clone(),
+                    captured_vars: captured_regs,
+                    is_lambda: false,
+                });
+                
+                // Also define the method with the block's function symbol
+                // This associates the method name with the block's implementation
+                self.emit(MirInst::DefMethod(class_reg, func_symbol.clone(), func_symbol));
+                
+                // Emit DefineMethodDynamic for any additional runtime handling
                 self.emit(MirInst::DefineMethodDynamic {
                     dest: reg,
                     class_reg,
                     name_reg,
-                    method_func,
+                    method_func: "__defined_method__".to_string(),
                     visibility,
+                    block_reg: Some(block_reg),
                 });
                 reg
             }
@@ -686,11 +883,19 @@ impl HirLowering {
                     // Create block function from the body
                     let func_symbol = format!("block_in_send_{}_{}", self.current_blocks.len(), self.next_reg);
                     let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
-                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &block.captured_vars);
+                    
+                    // Check if block captures self and add to captured_vars if needed
+                    // But don't add if self is already the first captured var (common case)
+                    let mut effective_captured_vars = block.captured_vars.clone();
+                    if block.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                        effective_captured_vars.insert(0, "self".to_string());
+                    }
+                    
+                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &effective_captured_vars);
                     self.block_functions.push(block_func);
                     
                     // Load captured variables from the HIR block
-                    let captured_regs: Vec<RegId> = block.captured_vars.iter()
+                    let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                         .map(|name| {
                             let reg = self.alloc_reg();
                             self.emit(MirInst::Load(reg, name.clone()));
@@ -748,11 +953,19 @@ impl HirLowering {
                     // Create block function from the body
                     let func_symbol = format!("block_in_public_send_{}_{}", self.current_blocks.len(), self.next_reg);
                     let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
-                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &block.captured_vars);
+                    
+                    // Check if block captures self and add to captured_vars if needed
+                    // But don't add if self is already the first captured var (common case)
+                    let mut effective_captured_vars = block.captured_vars.clone();
+                    if block.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                        effective_captured_vars.insert(0, "self".to_string());
+                    }
+                    
+                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &effective_captured_vars);
                     self.block_functions.push(block_func);
                     
                     // Load captured variables from the HIR block
-                    let captured_regs: Vec<RegId> = block.captured_vars.iter()
+                    let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                         .map(|name| {
                             let reg = self.alloc_reg();
                             self.emit(MirInst::Load(reg, name.clone()));
@@ -789,11 +1002,19 @@ impl HirLowering {
                     // Create block function from the body
                     let func_symbol = format!("block_in_internal_send_{}_{}", self.current_blocks.len(), self.next_reg);
                     let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
-                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &block.captured_vars);
+                    
+                    // Check if block captures self and add to captured_vars if needed
+                    // But don't add if self is already the first captured var (common case)
+                    let mut effective_captured_vars = block.captured_vars.clone();
+                    if block.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                        effective_captured_vars.insert(0, "self".to_string());
+                    }
+                    
+                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &effective_captured_vars);
                     self.block_functions.push(block_func);
                     
                     // Load captured variables from the HIR block
-                    let captured_regs: Vec<RegId> = block.captured_vars.iter()
+                    let captured_regs: Vec<RegId> = effective_captured_vars.iter()
                         .map(|name| {
                             let reg = self.alloc_reg();
                             self.emit(MirInst::Load(reg, name.clone()));
@@ -925,7 +1146,7 @@ impl HirLowering {
                     });
                 let module_reg = self.lower_node(&inc.module);
                 let reg = self.alloc_reg();
-                self.emit(MirInst::IncludeModule(class_reg, format!("module_{}", module_reg)));
+                self.emit(MirInst::IncludeModule(class_reg, module_reg));
                 reg
             }
             HirNode::Extend(ext) => {
@@ -938,7 +1159,7 @@ impl HirLowering {
                     });
                 let module_reg = self.lower_node(&ext.module);
                 let reg = self.alloc_reg();
-                self.emit(MirInst::ExtendModule(obj_reg, format!("module_{}", module_reg)));
+                self.emit(MirInst::ExtendModule(obj_reg, module_reg));
                 reg
             }
             HirNode::Prepend(pre) => {
@@ -951,7 +1172,7 @@ impl HirLowering {
                     });
                 let module_reg = self.lower_node(&pre.module);
                 let reg = self.alloc_reg();
-                self.emit(MirInst::PrependModule(class_reg, format!("module_{}", module_reg)));
+                self.emit(MirInst::PrependModule(class_reg, module_reg));
                 reg
             }
 
@@ -961,10 +1182,39 @@ impl HirLowering {
                 let name_reg = self.alloc_reg();
                 self.emit(MirInst::LoadConst(name_reg, MirConst::Symbol(mm.method_name.clone())));
                 let arg_regs: Vec<RegId> = mm.args.iter().map(|a| self.lower_node(a)).collect();
-                let block_reg = mm.block.as_ref().map(|_| {
-                    let r = self.alloc_reg();
-                    self.emit(MirInst::LoadConst(r, MirConst::Nil));
-                    r
+                // Properly lower the block if present
+                let block_reg = mm.block.as_ref().map(|block| {
+                    let func_symbol = format!("block_in_mm_{}_{}", mm.method_name, self.next_reg);
+                    let body_cloned: Vec<HirNode> = block.body.iter().cloned().collect();
+                    
+                    // Check if block captures self and add to captured_vars if needed
+                    // But don't add if self is already the first captured var (common case)
+                    let mut effective_captured_vars = block.captured_vars.clone();
+                    if block.captures_self && effective_captured_vars.first().map_or(true, |s| s != "self") {
+                        effective_captured_vars.insert(0, "self".to_string());
+                    }
+                    
+                    let block_func = self.lower_block_function(&func_symbol, &block.params, &body_cloned, &effective_captured_vars);
+                    self.block_functions.push(block_func);
+                    
+                    // Load captured variables
+                    let captured_regs: Vec<RegId> = effective_captured_vars.iter()
+                        .map(|name| {
+                            let reg = self.alloc_reg();
+                            self.emit(MirInst::Load(reg, name.clone()));
+                            reg
+                        })
+                        .collect();
+                    
+                    // Create block object
+                    let reg = self.alloc_reg();
+                    self.emit(MirInst::BlockCreate {
+                        dest: reg,
+                        func_symbol,
+                        captured_vars: captured_regs,
+                        is_lambda: false,
+                    });
+                    reg
                 });
                 let reg = self.alloc_reg();
                 self.emit(MirInst::MethodMissing { dest: reg, obj_reg, name_reg, args: arg_regs, block_reg });
@@ -1056,7 +1306,16 @@ impl HirLowering {
         self.next_reg = 0;
         self.next_block = 0;
 
-        // Allocate registers for block parameters
+        // Allocate registers for captured variables FIRST - these come as initial parameters
+        // from the block creation/call site
+        let capture_regs: Vec<RegId> = captured_vars.iter().map(|name| {
+            let reg = self.alloc_reg();
+            // Store the capture value to the local variable name so body can reference it
+            self.emit(MirInst::Store(name.clone(), reg));
+            reg
+        }).collect();
+        
+        // Allocate registers for block parameters (these come from yield call AFTER captures)
         let param_regs: Vec<RegId> = params.iter().map(|p| {
             let reg = self.alloc_reg();
             self.emit(MirInst::Store(p.name.clone(), reg));
@@ -1077,10 +1336,13 @@ impl HirLowering {
         };
         self.finish_block(terminator);
 
-        // Create the function with captured variable tracking
+        // Create the function - params include captures FIRST, then yield params
+        let mut all_params = capture_regs;
+        all_params.extend(param_regs);
+        
         let func = MirFunction {
             name: name.to_string(),
-            params: param_regs,
+            params: all_params,
             blocks: std::mem::take(&mut self.current_blocks),
             next_reg: self.next_reg,
             span: jdruby_common::SourceSpan::default(),
@@ -1152,6 +1414,26 @@ fn contains_define_method(node: &HirNode) -> bool {
         HirNode::Seq(nodes) => nodes.iter().any(contains_define_method),
         _ => false,
     }
+}
+
+/// Check if a symbol argument matches the block's symbol content
+/// This is used to detect &:sym syntax where the symbol in args should become the block
+fn is_symbol_block_arg(arg: &jdruby_hir::HirNode, block: Option<&jdruby_hir::HirBlock>) -> bool {
+    if let Some(block) = block {
+        // Check if block body is a single symbol literal that matches the arg
+        if block.body.len() == 1 {
+            if let jdruby_hir::HirNode::Literal(arg_lit) = arg {
+                if let jdruby_hir::HirLiteralValue::Symbol(arg_sym) = &arg_lit.value {
+                    if let jdruby_hir::HirNode::Literal(block_lit) = &block.body[0] {
+                        if let jdruby_hir::HirLiteralValue::Symbol(block_sym) = &block_lit.value {
+                            return arg_sym == block_sym;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 impl Default for HirLowering {

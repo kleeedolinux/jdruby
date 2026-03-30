@@ -9,7 +9,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 jdruby-common.workspace = true
-jdruby-runtime.workspace = true
+jdruby-runtime = { path = "../jdruby-runtime" }
 jdgc = { path = "../jdgc" }
+parking_lot = "0.12"
 libc = "0.2"
 lazy_static = "1.4"

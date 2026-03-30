@@ -255,7 +255,7 @@ impl MirInterpreter {
                 let result = self.dispatch_call(name, &arg_vals);
                 self.registers.insert(*dest, result);
             }
-            MirInst::MethodCall(dest, recv, method, args) => {
+            MirInst::MethodCall(dest, recv, method, args, _block_reg) => {
                 let recv_val = self.get_reg(*recv);
                 let arg_vals: Vec<IrValue> = args.iter().map(|r| self.get_reg(*r)).collect();
                 let result = self.dispatch_method_call(&recv_val, method, &arg_vals);
@@ -309,12 +309,17 @@ impl MirInterpreter {
                         .insert(method_name.clone(), func_name.clone());
                 }
             }
-            MirInst::IncludeModule(class_reg, module_name) => {
+            MirInst::IncludeModule(class_reg, module_reg) => {
                 if let IrValue::Object(class_name, 0) = self.get_reg(*class_reg) {
-                    if let Some(mod_methods) = self.class_methods.get(module_name).cloned() {
-                        let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
-                        for (name, func_name) in mod_methods {
-                            cls_methods.insert(name, func_name);
+                    let module_val = self.get_reg(*module_reg);
+                    if let IrValue::Object(module_name, 0) = module_val {
+                        // Strip "Module:" prefix if present to match method table entries
+                        let table_key = module_name.strip_prefix("Module:").unwrap_or(&module_name);
+                        if let Some(mod_methods) = self.class_methods.get(table_key).cloned() {
+                            let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
+                            for (name, func_name) in mod_methods {
+                                cls_methods.insert(name, func_name);
+                            }
                         }
                     }
                 }
@@ -343,23 +348,31 @@ impl MirInterpreter {
                 };
                 self.registers.insert(*dest, result);
             },
-                        MirInst::PrependModule(class_reg, module_name) => {
+                        MirInst::PrependModule(class_reg, module_reg) => {
                 if let IrValue::Object(class_name, 0) = self.get_reg(*class_reg) {
                     // Prepend means insert module methods before class methods
-                    if let Some(mod_methods) = self.class_methods.get(module_name).cloned() {
-                        let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
-                        // Insert at beginning (prepend)
-                        let mut new_methods = mod_methods.clone();
-                        new_methods.extend(cls_methods.clone());
-                        *cls_methods = new_methods;
+                    let module_val = self.get_reg(*module_reg);
+                    if let IrValue::Object(module_name, 0) = module_val {
+                        // Strip "Module:" prefix if present to match method table entries
+                        let table_key = module_name.strip_prefix("Module:").unwrap_or(&module_name);
+                        if let Some(mod_methods) = self.class_methods.get(table_key).cloned() {
+                            let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
+                            // Insert at beginning (prepend)
+                            let mut new_methods = mod_methods.clone();
+                            new_methods.extend(cls_methods.clone());
+                            *cls_methods = new_methods;
+                        }
                     }
                 }
             },
-                        MirInst::ExtendModule(obj_reg, module_name) => {
+                        MirInst::ExtendModule(obj_reg, module_reg) => {
                 // Extend adds module methods to the object's singleton class
                 let obj = self.get_reg(*obj_reg);
-                if let IrValue::Object(class_name, obj_id) = obj {
-                    if let Some(mod_methods) = self.class_methods.get(module_name).cloned() {
+                let module_val = self.get_reg(*module_reg);
+                if let (IrValue::Object(class_name, obj_id), IrValue::Object(module_name, 0)) = (obj, module_val) {
+                    // Strip "Module:" prefix if present to match method table entries
+                    let table_key = module_name.strip_prefix("Module:").unwrap_or(&module_name);
+                    if let Some(mod_methods) = self.class_methods.get(table_key).cloned() {
                         let singleton_name = format!("#<SingletonClass:{}>", class_name);
                         let singleton_methods = self.class_methods.entry(singleton_name).or_insert_with(HashMap::new);
                         for (name, func) in mod_methods {
@@ -438,9 +451,10 @@ impl MirInterpreter {
                 };
                 self.registers.insert(*dest, result);
             },
-            MirInst::DefineMethodDynamic { dest, class_reg, name_reg, method_func, visibility } => {
+            MirInst::DefineMethodDynamic { dest, class_reg, name_reg, method_func, visibility, block_reg } => {
                 let class = self.get_reg(*class_reg);
                 let name_val = self.get_reg(*name_reg);
+                let _block = block_reg.map(|r| self.get_reg(r));
                 if let (IrValue::Object(class_name, 0), IrValue::String(method_name) | IrValue::Symbol(method_name)) = (class, name_val) {
                     let cls_methods = self.class_methods.entry(class_name).or_insert_with(HashMap::new);
                     cls_methods.insert(method_name, method_func.clone());
@@ -761,6 +775,16 @@ impl MirInterpreter {
                 let arg_vals: Vec<IrValue> = args.iter().map(|r| self.get_reg(*r)).collect();
                 let result = self.dispatch_method_call(&recv_val, method_name, &arg_vals);
                 self.registers.insert(*dest, result);
+            },
+            // SymbolToProc - convert symbol to proc (simplified)
+            MirInst::SymbolToProc { dest, symbol_reg } => {
+                let sym_val = self.get_reg(*symbol_reg);
+                // For now, just store the symbol as a Block value (simplified)
+                if let IrValue::Symbol(method_name) = sym_val {
+                    self.registers.insert(*dest, IrValue::Block(method_name, vec![]));
+                } else {
+                    self.registers.insert(*dest, IrValue::Nil);
+                }
             },
         }
     }
@@ -1305,6 +1329,7 @@ mod tests {
                                 name_reg: 1,
                                 method_func: "Task#run".into(),
                                 visibility: jdruby_mir::MirVisibility::Public,
+                                block_reg: None,
                             },
                             // Check that method was defined
                             MirInst::Load(3, "Task".into()),

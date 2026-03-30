@@ -27,7 +27,7 @@ impl SelectionPattern for DirectCallPattern {
     fn matches(&self, insts: &[MirInst], ctx: &MatchContext) -> Option<usize> {
         // Match MethodCall with known receiver type
         match insts.first() {
-            Some(MirInst::MethodCall(_, obj_reg, _, _)) => {
+            Some(MirInst::MethodCall(_, obj_reg, _, _, _)) => {
                 let obj_type = ctx.get_type(*obj_reg);
 
                 // Only match if we know the exact type

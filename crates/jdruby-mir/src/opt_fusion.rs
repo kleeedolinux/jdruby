@@ -174,7 +174,7 @@ impl InstructionFusion {
                             *right = root;
                         }
                     }
-                    MirInst::MethodCall(_dest, recv, _method, args) => {
+                    MirInst::MethodCall(_dest, recv, _method, args, _block) => {
                         // Replace receiver and args with their roots
                         if let Some(&root) = copy_chain.get(recv) {
                             *recv = root;

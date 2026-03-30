@@ -17,6 +17,8 @@ pub struct ClassTable {
     names: HashMap<VALUE, String>,
     /// Class name → class VALUE (reverse lookup)
     name_to_class: HashMap<String, VALUE>,
+    /// Class VALUE → singleton class VALUE
+    singleton_classes: HashMap<VALUE, VALUE>,
     /// Next available class ID
     next_class_id: VALUE,
 }
@@ -27,6 +29,7 @@ impl ClassTable {
             hierarchy: HashMap::new(),
             names: HashMap::new(),
             name_to_class: HashMap::new(),
+            singleton_classes: HashMap::new(),
             next_class_id: 0x1_0000, // class IDs start high to avoid tag collisions
         }
     }
@@ -75,6 +78,36 @@ impl ClassTable {
         // Encode: class + method_name hash
         let method_hash = method_name.len() as VALUE;
         class.wrapping_add(method_hash << 4)
+    }
+
+    /// Get or create the singleton class for a class.
+    /// In Ruby, class methods are defined on the singleton class.
+    pub fn singleton_class(&mut self, klass: VALUE) -> Option<VALUE> {
+        // Check if we already have a singleton class for this class
+        if let Some(&singleton) = self.singleton_classes.get(&klass) {
+            eprintln!("DEBUG: singleton_class({}) -> existing {}", klass, singleton);
+            return Some(singleton);
+        }
+        
+        // Create a new singleton class
+        let singleton_id = self.next_class_id;
+        self.next_class_id += 8;
+        
+        // Get the class name for the singleton class name
+        let class_name = self.names.get(&klass).cloned().unwrap_or_else(|| "Anonymous".to_string());
+        let singleton_name = format!("#<Class:{}>", class_name);
+        
+        // The singleton class's superclass is the class's superclass's singleton class
+        // For simplicity, we just use the class itself as the "superclass" for method lookup
+        let superclass = self.hierarchy.get(&klass).copied().unwrap_or(0);
+        
+        self.hierarchy.insert(singleton_id, superclass);
+        self.names.insert(singleton_id, singleton_name);
+        self.singleton_classes.insert(klass, singleton_id);
+        
+        eprintln!("DEBUG: singleton_class({}) -> created new {}", klass, singleton_id);
+        
+        Some(singleton_id)
     }
 }
 

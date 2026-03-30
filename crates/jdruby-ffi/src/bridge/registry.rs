@@ -70,24 +70,31 @@ impl Clone for ObjectRef {
 pub struct Registry {
     /// VALUE → Object reference (unified storage)
     objects: RwLock<HashMap<VALUE, ObjectRef>>,
+    /// VALUE → Class VALUE (object class tracking)
+    object_classes: RwLock<HashMap<VALUE, VALUE>>,
     /// Lock for ID generation
     next_id_lock: Mutex<()>,
     /// Next unique VALUE ID
     next_id: AtomicU64,
-    /// Block storage for metaprogramming
-    blocks: RwLock<HashMap<String, Vec<VALUE>>>,
+    /// Block storage for metaprogramming - keyed by block VALUE (not func_name)
+    /// This ensures each block instance has its own captures
+    blocks: RwLock<HashMap<VALUE, (String, Vec<VALUE>)>>,
     /// Current block for implicit block parameter
     current_block: RwLock<Option<VALUE>>,
+    /// Current self (receiver) for method calls
+    current_self: RwLock<Option<VALUE>>,
 }
 
 impl Registry {
     fn new() -> Self {
         Self {
             objects: RwLock::new(HashMap::new()),
+            object_classes: RwLock::new(HashMap::new()),
             next_id_lock: Mutex::new(()),
             next_id: AtomicU64::new(0x10000), // Start above special constants
             blocks: RwLock::new(HashMap::new()),
             current_block: RwLock::new(None),
+            current_self: RwLock::new(None),
         }
     }
 
@@ -97,16 +104,32 @@ impl Registry {
         self.next_id.fetch_add(8, Ordering::SeqCst) as VALUE
     }
 
-    /// Insert an object into the registry.
-    pub fn insert(&self, value: VALUE, obj_ref: ObjectRef) {
+    /// Insert an object into the registry with its class.
+    pub fn insert_with_class(&self, value: VALUE, obj_ref: ObjectRef, class: VALUE) {
         let mut objects = self.objects.write().unwrap();
         objects.insert(value, obj_ref);
+        drop(objects);
+        // Store class separately
+        let mut classes = self.object_classes.write().unwrap();
+        classes.insert(value, class);
+    }
+
+    /// Get the class of an object.
+    pub fn get_class(&self, value: VALUE) -> Option<VALUE> {
+        let classes = self.object_classes.read().unwrap();
+        classes.get(&value).copied()
     }
 
     /// Get a reference to an object.
     pub fn get(&self, value: VALUE) -> Option<ObjectRef> {
         let objects = self.objects.read().unwrap();
         objects.get(&value).cloned()
+    }
+
+    /// Insert an object into the registry (without class info - backward compatible).
+    pub fn insert(&self, value: VALUE, obj_ref: ObjectRef) {
+        let mut objects = self.objects.write().unwrap();
+        objects.insert(value, obj_ref);
     }
 
     /// Remove an object from the registry.
@@ -133,10 +156,10 @@ impl Registry {
         objects.len()
     }
 
-    /// Store a block with captured variables
-    pub fn store_block(&self, func_symbol: &str, captured: Vec<VALUE>) {
+    /// Store a block with captured variables - uses block VALUE as key for uniqueness
+    pub fn store_block(&self, block_value: VALUE, func_symbol: &str, captured: Vec<VALUE>) {
         let mut blocks = self.blocks.write().unwrap();
-        blocks.insert(func_symbol.to_string(), captured);
+        blocks.insert(block_value, (func_symbol.to_string(), captured));
     }
 
     /// Get current block
@@ -151,10 +174,22 @@ impl Registry {
         *current = block;
     }
 
-    /// Get captured variables for a block
-    pub fn get_block_captures(&self, func_symbol: &str) -> Option<Vec<VALUE>> {
+    /// Get current self (receiver)
+    pub fn get_current_self(&self) -> Option<VALUE> {
+        let self_val = self.current_self.read().unwrap();
+        *self_val
+    }
+
+    /// Set current self (receiver)
+    pub fn set_current_self(&self, self_val: Option<VALUE>) {
+        let mut current = self.current_self.write().unwrap();
+        *current = self_val;
+    }
+
+    /// Get captured variables for a block by its VALUE (not func_name)
+    pub fn get_block_captures(&self, block_value: VALUE) -> Option<(String, Vec<VALUE>)> {
         let blocks = self.blocks.read().unwrap();
-        blocks.get(func_symbol).cloned()
+        blocks.get(&block_value).cloned()
     }
 }
 

@@ -29,7 +29,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{TargetMachine, TargetTriple};
 use inkwell::builder::Builder;
-use inkwell::values::{BasicValueEnum, FunctionValue};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 use jdruby_common::{Diagnostic, ErrorReporter, SourceSpan};
@@ -150,12 +150,17 @@ impl RuntimeType {
 /// All runtime functions available to generated code.
 pub static RUNTIME_FNS: &[RuntimeFn] = &[
     RuntimeFn { name: "jdruby_init_bridge", ret_type: RuntimeType::Void, param_types: &[], variadic: false },
+    RuntimeFn { name: "jdruby_check_errors", ret_type: RuntimeType::I32, param_types: &[], variadic: false },
     RuntimeFn { name: "jdruby_int_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_float_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::F64], variadic: false },
     RuntimeFn { name: "jdruby_str_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_sym_intern", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
-    RuntimeFn { name: "jdruby_ary_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: false },
-    RuntimeFn { name: "jdruby_hash_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I32], variadic: false },
+    RuntimeFn { name: "jdruby_ary_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: true },
+    RuntimeFn { name: "jdruby_ary_new_empty", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    RuntimeFn { name: "jdruby_ary_push", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_hash_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: true },
+    RuntimeFn { name: "jdruby_hash_new_empty", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    RuntimeFn { name: "jdruby_hash_set", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_bool", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I1], variadic: false },
     RuntimeFn { name: "jdruby_str_concat", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_to_s", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
@@ -183,8 +188,9 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     RuntimeFn { name: "jdruby_module_new", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_singleton_class_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_def_method", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr, RuntimeType::Ptr], variadic: false },
-    RuntimeFn { name: "jdruby_prepend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
-    RuntimeFn { name: "jdruby_extend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
+    RuntimeFn { name: "jdruby_include_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_prepend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
+    RuntimeFn { name: "jdruby_extend_module", ret_type: RuntimeType::Void, param_types: &[RuntimeType::I64, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_const_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_const_set", ret_type: RuntimeType::Void, param_types: &[RuntimeType::Ptr, RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_ivar_get", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::Ptr], variadic: false },
@@ -194,6 +200,7 @@ pub static RUNTIME_FNS: &[RuntimeFn] = &[
     RuntimeFn { name: "jdruby_lambda_create", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_block_yield", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I32, RuntimeType::Ptr], variadic: false },
     RuntimeFn { name: "jdruby_current_block", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
+    RuntimeFn { name: "jdruby_current_self", ret_type: RuntimeType::I64, param_types: &[], variadic: false },
     RuntimeFn { name: "jdruby_symbol_to_proc", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_is_symbol", ret_type: RuntimeType::I1, param_types: &[RuntimeType::I64], variadic: false },
     RuntimeFn { name: "jdruby_define_method_dynamic", ret_type: RuntimeType::I64, param_types: &[RuntimeType::I64, RuntimeType::I64, RuntimeType::Ptr, RuntimeType::I32], variadic: false },
@@ -439,11 +446,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let i64_type = self.llvm_context.i64_type();
         for func in &module.functions {
-            let total_params = if func.name.starts_with("block_") || func.name.starts_with("block_in_") || func.name.starts_with("__sym_proc_") {
-                func.params.len() + func.captured_vars.len()
-            } else {
-                func.params.len()
-            };
+            // Use func.params.len() for all functions - block functions have
+            // captured_vars + yielded_args in their params list
+            let total_params = func.params.len();
             let fn_type = i64_type.fn_type(&vec![i64_type.into(); total_params], false);
             let fn_name = sanitize_name(&func.name);
             llvm_module.add_function(&fn_name, fn_type, None);
@@ -500,11 +505,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let i64_type = self.llvm_context.i64_type();
         for func in &module.functions {
-            let total_params = if func.name.starts_with("block_") || func.name.starts_with("block_in_") || func.name.starts_with("__sym_proc_") {
-                func.params.len() + func.captured_vars.len()
-            } else {
-                func.params.len()
-            };
+            // Use func.params.len() for all functions
+            let total_params = func.params.len();
             let fn_type = i64_type.fn_type(&vec![i64_type.into(); total_params], false);
             let fn_name = sanitize_name(&func.name);
             llvm_module.add_function(&fn_name, fn_type, None);
@@ -587,27 +589,8 @@ fn emit_function<'ctx>(
         func_codegen.record_register_def(param_reg, RubyType::Unknown, 0, i as u32);
     }
 
-    // Handle captured variables for block functions - they are passed as additional parameters
-    let num_params = func.params.len();
-    for (i, captured_var_name) in func.captured_vars.iter().enumerate() {
-        let param_idx = (num_params + i) as u32;
-        let param = function.get_nth_param(param_idx)
-            .ok_or_else(|| vec![Diagnostic::error(
-                format!("Captured var parameter {} not found", param_idx),
-                func.span,
-            )])?;
-        // Store the captured variable value to its local alloca
-        let ptr = func_codegen.get_or_create_local(captured_var_name, builder);
-        builder.build_store(ptr, param)
-            .map_err(|e| vec![Diagnostic::error(format!("Store captured var failed: {:?}", e), func.span)])?;
-        // Also set up a register mapping so Load instructions work correctly
-        // Find the register that was assigned to this captured var in the MIR
-        if let Some(&reg_id) = func.params.get(param_idx as usize) {
-            let typed_val = TypedValue::new(param, RubyType::Unknown, None);
-            func_codegen.set_register(reg_id, typed_val);
-            func_codegen.record_register_def(reg_id, RubyType::Unknown, 0, param_idx);
-        }
-    }
+    // Note: Block functions have captured_vars as Vec<String> (names), not RegIds
+    // The MIR lowering is responsible for setting up proper parameter mapping
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         if block_idx == 0 {
@@ -651,7 +634,7 @@ fn emit_function<'ctx>(
             }
         }
 
-        emit_terminator(&block.terminator, &ir_builder, &mut func_codegen, constant_table, ctx, function)?;
+        emit_terminator(&block.terminator, &ir_builder, &mut func_codegen, constant_table, ctx, function, &fn_name, module)?;
     }
 
     Ok(())
@@ -688,7 +671,16 @@ fn emit_instruction<'ctx>(
                     };
                     call.try_as_basic_value().unwrap_basic()
                 }
-                MirConst::Symbol(s) => constant_table.get_symbol(s),
+                MirConst::Symbol(s) => {
+                    let name_ptr = string_pool.get_cstring_ptr(builder, s);
+                    let fn_val = module.get_function("jdruby_sym_intern")
+                        .ok_or_else(|| Diagnostic::error("jdruby_sym_intern not found".to_string(), SourceSpan::default()))?;
+                    let call = match builder.build_call(fn_val, &[name_ptr.into()], "sym_intern") {
+                        Ok(c) => c,
+                        Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
+                    };
+                    call.try_as_basic_value().unwrap_basic()
+                }
                 MirConst::Bool(b) => constant_table.get_bool(*b),
                 MirConst::Nil => constant_table.get_nil(),
             };
@@ -731,13 +723,45 @@ fn emit_instruction<'ctx>(
                 let typed_val = TypedValue::new(value, RubyType::Unknown, None);
                 func_codegen.set_register(*dest, typed_val);
                 func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                // Constant lookup - use jdruby_const_get for uppercase names
+                let name_ptr = string_pool.get_cstring_ptr(builder, name);
+                let fn_val = module.get_function("jdruby_const_get")
+                    .ok_or_else(|| Diagnostic::error("jdruby_const_get not found".to_string(), SourceSpan::default()))?;
+                let call = match builder.build_call(fn_val, &[name_ptr.into()], &format!("const_get_{}", name)) {
+                    Ok(c) => c,
+                    Err(e) => return Err(Diagnostic::error(format!("Const get failed: {:?}", e), SourceSpan::default())),
+                };
+                let value = call.try_as_basic_value().unwrap_basic();
+                let typed_val = TypedValue::new(value, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+                func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            } else if *name == "self" && func_codegen.name() == "main" {
+                // Optimized path for "self" in main: get from runtime and use directly
+                // without storing to a local variable first (eliminates redundant store/load)
+                let self_val = if let Some(self_fn) = module.get_function("jdruby_current_self") {
+                    match builder.build_call(self_fn, &[], "current_self") {
+                        Ok(c) => c.try_as_basic_value().unwrap_basic(),
+                        Err(_) => constant_table.get_nil(),
+                    }
+                } else {
+                    constant_table.get_nil()
+                };
+                let typed_val = TypedValue::new(self_val, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+                func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
             } else {
                 // Local variable - use stack allocation (alloca)
                 let ptr = func_codegen.get_or_create_local(name, builder);
+                
                 let i64_type = ctx.i64_type();
                 let loaded = builder.build_load(i64_type, ptr, &format!("load_{}", name))
                     .map_err(|e| Diagnostic::error(format!("Load failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment for i64 load to match stores
+                loaded.as_instruction_value()
+                    .and_then(|inst| inst.set_alignment(8).ok());
                 let value = loaded.into();
+                eprintln!("DEBUG: Load local '{}' -> {}", name, loaded);
                 let typed_val = TypedValue::new(value, RubyType::Unknown, None);
                 func_codegen.set_register(*dest, typed_val);
                 func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
@@ -748,15 +772,28 @@ fn emit_instruction<'ctx>(
             let value = func_codegen.get_register_or_nil(*src, constant_table).llvm_value();
             // Check if this is an instance variable (starts with @)
             if name.starts_with('@') {
-                // Load self (the current object)
+                // Load self (the current object) - try multiple strategies
                 let self_val = if let Some(self_reg) = func_codegen.get_register(0) {
+                    // Register 0 holds self
                     self_reg.llvm_value()
+                } else if let Some(self_ptr) = func_codegen.get_local("self") {
+                    // Local variable "self" exists
+                    let loaded = builder.build_load(ctx.i64_type(), self_ptr, "load_self")
+                        .map_err(|e| Diagnostic::error(format!("Load failed: {:?}", e), SourceSpan::default()))?;
+                    loaded.as_instruction_value()
+                        .and_then(|inst| inst.set_alignment(8).ok());
+                    loaded.into()
+                } else if let Some(fn_val) = module.get_function(&sanitize_name(func_codegen.name())) {
+                    // Try to get self from first function parameter
+                    if let Some(param) = fn_val.get_nth_param(0) {
+                        param
+                    } else {
+                        // No self available - use nil as fallback (this allows code generation to continue)
+                        constant_table.get_nil()
+                    }
                 } else {
-                    // Get self from the first parameter
-                    let fn_val = module.get_function(&sanitize_name(func_codegen.name()))
-                        .ok_or_else(|| Diagnostic::error(format!("Function {} not found", func_codegen.name()), SourceSpan::default()))?;
-                    fn_val.get_nth_param(0)
-                        .ok_or_else(|| Diagnostic::error("self parameter not found".to_string(), SourceSpan::default()))?
+                    // Function not found, use nil as fallback
+                    constant_table.get_nil()
                 };
                 // Get the ivar name without the @ prefix
                 let ivar_name = &name[1..];
@@ -767,11 +804,27 @@ fn emit_instruction<'ctx>(
                     Ok(_) => {},
                     Err(e) => return Err(Diagnostic::error(format!("Ivar set failed: {:?}", e), SourceSpan::default())),
                 };
+            } else if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                // Constant assignment - use jdruby_const_set for uppercase names
+                let name_ptr = string_pool.get_cstring_ptr(builder, name);
+                let fn_val = module.get_function("jdruby_const_set")
+                    .ok_or_else(|| Diagnostic::error("jdruby_const_set not found".to_string(), SourceSpan::default()))?;
+                match builder.build_call(fn_val, &[name_ptr.into(), value.into()], &format!("const_set_{}", name)) {
+                    Ok(_) => {},
+                    Err(e) => return Err(Diagnostic::error(format!("Const set failed: {:?}", e), SourceSpan::default())),
+                };
             } else {
                 // Local variable - use stack allocation (alloca)
-                let ptr = func_codegen.get_or_create_local(name, builder);
+                let ptr: PointerValue<'ctx> = func_codegen.get_or_create_local(name, builder);
+                eprintln!("DEBUG: Store local '{}' <- {}", name, value);
                 builder.build_store(ptr, value)
                     .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment for i64 store
+                let store_inst = builder.get_insert_block()
+                    .and_then(|bb| bb.get_last_instruction());
+                if let Some(inst) = store_inst {
+                    let _ = inst.set_alignment(8);
+                }
             }
         }
 
@@ -813,7 +866,20 @@ fn emit_instruction<'ctx>(
                 };
                 (val, is_void)
             } else {
-                let name_ptr = string_pool.get_cstring_ptr(builder, name);
+                // For implicit method calls (no receiver), use jdruby_send with self
+                // instead of jdruby_call which has no receiver
+                // Load self from local variable or use first function parameter
+                let self_val = if let Some(self_ptr) = func_codegen.get_local("self") {
+                    let loaded = builder.build_load(ctx.i64_type(), self_ptr, "load_self")
+                        .map_err(|e| Diagnostic::error(format!("Load failed: {:?}", e), SourceSpan::default()))?;
+                    // Set 8-byte alignment for i64 load
+                    loaded.as_instruction_value()
+                        .and_then(|inst| inst.set_alignment(8).ok());
+                    loaded.into_int_value()
+                } else {
+                    ctx.i64_type().const_int(0, false)  // 0 = no self available, not nil (4)
+                };
+                let method_ptr = string_pool.get_cstring_ptr(builder, name);
                 let len = ctx.i32_type().const_int(args.len() as u64, false);
                 let args_array = if args.is_empty() {
                     ctx.ptr_type(AddressSpace::default()).const_null()
@@ -823,6 +889,11 @@ fn emit_instruction<'ctx>(
                         i64_type.array_type(args.len() as u32),
                         "args_array",
                     ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                    // Set 8-byte alignment
+                    args_ptr.as_instruction()
+                        .expect("Alloca is an instruction")
+                        .set_alignment(8)
+                        .expect("Failed to set alignment");
                     for (i, &arg) in args.iter().enumerate() {
                         let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
                         let idx = ctx.i64_type().const_int(i as u64, false);
@@ -836,12 +907,24 @@ fn emit_instruction<'ctx>(
                         };
                         builder.build_store(elem_ptr, arg_val)
                             .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                        // Set 8-byte alignment for i64 store
+                        if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                            let _ = inst.set_alignment(8);
+                        }
                     }
                     args_ptr
                 };
-                let fn_val = module.get_function("jdruby_call")
-                    .ok_or_else(|| Diagnostic::error("jdruby_call not found".to_string(), SourceSpan::default()))?;
-                let call = match builder.build_call(fn_val, &[name_ptr.into(), len.into(), args_array.into()], &format!("runtime_call_{}", name)) {
+                // Convert method name to symbol and use jdruby_send_dynamic for consistency
+                let sym_fn = module.get_function("jdruby_sym_intern")
+                    .ok_or_else(|| Diagnostic::error("jdruby_sym_intern not found".to_string(), SourceSpan::default()))?;
+                let method_sym = match builder.build_call(sym_fn, &[method_ptr.into()], &format!("method_sym_{}", name)) {
+                    Ok(c) => c.try_as_basic_value().unwrap_basic(),
+                    Err(e) => return Err(Diagnostic::error(format!("Symbol intern failed: {:?}", e), SourceSpan::default())),
+                };
+                let fn_val = module.get_function("jdruby_send_dynamic")
+                    .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
+                let block_val = ctx.i64_type().const_int(0, false).into();
+                let call = match builder.build_call(fn_val, &[self_val.into(), method_sym.into(), len.into(), args_array.into(), block_val], &format!("runtime_call_{}", name)) {
                     Ok(c) => c,
                     Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
                 };
@@ -856,9 +939,8 @@ fn emit_instruction<'ctx>(
             }
         }
 
-        MethodCall(dest, obj, method, args) => {
+        MethodCall(dest, obj, method, args, block_reg) => {
             let obj_val = func_codegen.get_register_or_nil(*obj, constant_table).llvm_value();
-            let method_ptr = string_pool.get_cstring_ptr(builder, method);
             let len = ctx.i32_type().const_int(args.len() as u64, false);
             let args_array = if args.is_empty() {
                 ctx.ptr_type(AddressSpace::default()).const_null()
@@ -868,6 +950,11 @@ fn emit_instruction<'ctx>(
                     i64_type.array_type(args.len() as u32),
                     "method_args",
                 ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment
+                args_ptr.as_instruction()
+                    .expect("Alloca is an instruction")
+                    .set_alignment(8)
+                    .expect("Failed to set alignment");
                 for (i, &arg) in args.iter().enumerate() {
                     let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
                     let idx = ctx.i64_type().const_int(i as u64, false);
@@ -881,18 +968,64 @@ fn emit_instruction<'ctx>(
                     };
                     builder.build_store(elem_ptr, arg_val)
                         .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                    // Set 8-byte alignment for i64 store
+                    if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                        let _ = inst.set_alignment(8);
+                    }
                 }
                 args_ptr
             };
-            let fn_val = module.get_function("jdruby_send")
-                .ok_or_else(|| Diagnostic::error("jdruby_send not found".to_string(), SourceSpan::default()))?;
-            let call = match builder.build_call(fn_val, &[obj_val.into(), method_ptr.into(), len.into(), args_array.into()], &format!("send_{}", method)) {
-                Ok(c) => c,
-                Err(e) => return Err(Diagnostic::error(format!("Send failed: {:?}", e), SourceSpan::default())),
-            };
-            let result = call.try_as_basic_value().unwrap_basic();
-            let typed_val = TypedValue::new(result, RubyType::Unknown, None);
-            func_codegen.set_register(*dest, typed_val);
+            
+            // If block is present, use jdruby_send_dynamic which supports blocks
+            // Otherwise use jdruby_send (faster for simple method calls)
+            if let Some(block) = block_reg {
+                // Use runtime symbol interning for the method name
+                let method_name_ptr = string_pool.get_cstring_ptr(builder, method);
+                let sym_fn = module.get_function("jdruby_sym_intern")
+                    .ok_or_else(|| Diagnostic::error("jdruby_sym_intern not found".to_string(), SourceSpan::default()))?;
+                let method_sym = match builder.build_call(sym_fn, &[method_name_ptr.into()], &format!("method_sym_{}", method)) {
+                    Ok(c) => c.try_as_basic_value().unwrap_basic(),
+                    Err(e) => return Err(Diagnostic::error(format!("Symbol intern failed: {:?}", e), SourceSpan::default())),
+                };
+                let fn_val = module.get_function("jdruby_send_dynamic")
+                    .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
+                let block_val = func_codegen.get_register_or_nil(*block, constant_table).llvm_value();
+                let call = match builder.build_call(
+                    fn_val, 
+                    &[obj_val.into(), method_sym.into(), len.into(), args_array.into(), block_val.into()], 
+                    &format!("send_{}", method)
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return Err(Diagnostic::error(format!("Send failed: {:?}", e), SourceSpan::default())),
+                };
+                let result = call.try_as_basic_value().unwrap_basic();
+                let typed_val = TypedValue::new(result, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+            } else {
+                // Always use jdruby_send_dynamic for consistency (supports both with and without block)
+                let method_name_ptr = string_pool.get_cstring_ptr(builder, method);
+                let sym_fn = module.get_function("jdruby_sym_intern")
+                    .ok_or_else(|| Diagnostic::error("jdruby_sym_intern not found".to_string(), SourceSpan::default()))?;
+                let method_sym = match builder.build_call(sym_fn, &[method_name_ptr.into()], &format!("method_sym_{}", method)) {
+                    Ok(c) => c.try_as_basic_value().unwrap_basic(),
+                    Err(e) => return Err(Diagnostic::error(format!("Symbol intern failed: {:?}", e), SourceSpan::default())),
+                };
+                let fn_val = module.get_function("jdruby_send_dynamic")
+                    .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
+                // No block - pass 0 (null pointer as i64, not Qnil=4)
+                let block_val = ctx.i64_type().const_int(0, false).into();
+                let call = match builder.build_call(
+                    fn_val, 
+                    &[obj_val.into(), method_sym.into(), len.into(), args_array.into(), block_val], 
+                    &format!("send_{}", method)
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return Err(Diagnostic::error(format!("Send failed: {:?}", e), SourceSpan::default())),
+                };
+                let result = call.try_as_basic_value().unwrap_basic();
+                let typed_val = TypedValue::new(result, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+            }
             func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
             func_codegen.record_register_use(*obj, block_idx, inst_idx);
             for &arg in args {
@@ -924,43 +1057,119 @@ fn emit_instruction<'ctx>(
             let typed_val = TypedValue::new(result, RubyType::Class, None);
             func_codegen.set_register(*dest, typed_val);
             func_codegen.record_register_def(*dest, RubyType::Class, block_idx, inst_idx);
+            
+            // Also store the class VALUE to the global for the class name
+            // This ensures the class constant is properly registered
+            let global_name = sanitize_name(name);
+            if let Some(global) = module.get_global(&global_name) {
+                builder.build_store(global.as_pointer_value(), result)
+                    .map_err(|e| Diagnostic::error(format!("Store to global failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment for i64 store
+                if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                    let _ = inst.set_alignment(8);
+                }
+            }
         }
 
         DefMethod(class_reg, method_name, func_name) => {
             let class_val = func_codegen.get_register_or_nil(*class_reg, constant_table).llvm_value();
             let method_ptr = string_pool.get_cstring_ptr(builder, method_name);
-            let func_ptr = string_pool.get_cstring_ptr(builder, func_name);
+            // Get the sanitized function name for the runtime
+            let fn_name = sanitize_name(func_name);
+            // Pass the function name as a C string, not a function pointer
+            let func_name_ptr = string_pool.get_cstring_ptr(builder, &fn_name);
+            // Get or create the function - it may be defined later or be an external runtime function
+            let func_val = if let Some(existing_fn) = module.get_function(&fn_name) {
+                existing_fn
+            } else {
+                // Function doesn't exist yet - declare it with default signature (i64(i64))
+                // This allows forward references to methods that will be defined later
+                let i64_type = ctx.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function(&fn_name, fn_type, None)
+            };
+            // We don't use the func_val pointer directly - it's just for declaration
+            // The runtime will look up the function by name using dlsym
+            let _func_ptr = func_val.as_global_value().as_pointer_value();
             let fn_val = module.get_function("jdruby_def_method")
                 .ok_or_else(|| Diagnostic::error("jdruby_def_method not found".to_string(), SourceSpan::default()))?;
-            match builder.build_call(fn_val, &[class_val.into(), method_ptr.into(), func_ptr.into()], "def_method") {
+            match builder.build_call(fn_val, &[class_val.into(), method_ptr.into(), func_name_ptr.into()], "def_method") {
                 Ok(_) => {},
                 Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
             };
             func_codegen.record_register_use(*class_reg, block_idx, inst_idx);
         }
 
-        IncludeModule(class_reg, module_name) => {
+        SingletonClassGet(dest, obj_reg) => {
+            let obj_val = func_codegen.get_register_or_nil(*obj_reg, constant_table).llvm_value();
+            let fn_val = module.get_function("jdruby_singleton_class_get")
+                .ok_or_else(|| Diagnostic::error("jdruby_singleton_class_get not found".to_string(), SourceSpan::default()))?;
+            let call = match builder.build_call(fn_val, &[obj_val.into()], "singleton_class_get") {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("SingletonClassGet failed: {:?}", e), SourceSpan::default())),
+            };
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Class, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Class, block_idx, inst_idx);
+            func_codegen.record_register_use(*obj_reg, block_idx, inst_idx);
+        }
+
+        IncludeModule(class_reg, module_reg) => {
             let class_val = func_codegen.get_register_or_nil(*class_reg, constant_table).llvm_value();
-            let module_ptr = string_pool.get_cstring_ptr(builder, module_name);
-            let fn_val = module.get_function("jdruby_prepend_module")
-                .ok_or_else(|| Diagnostic::error("jdruby_prepend_module not found".to_string(), SourceSpan::default()))?;
-            match builder.build_call(fn_val, &[class_val.into(), module_ptr.into()], "include_module") {
+            let module_val = func_codegen.get_register_or_nil(*module_reg, constant_table).llvm_value();
+            let fn_val = module.get_function("jdruby_include_module")
+                .ok_or_else(|| Diagnostic::error("jdruby_include_module not found".to_string(), SourceSpan::default()))?;
+            match builder.build_call(fn_val, &[class_val.into(), module_val.into()], "include_module") {
                 Ok(_) => {},
                 Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
             };
             func_codegen.record_register_use(*class_reg, block_idx, inst_idx);
+            func_codegen.record_register_use(*module_reg, block_idx, inst_idx);
+        }
+
+        PrependModule(class_reg, module_reg) => {
+            let class_val = func_codegen.get_register_or_nil(*class_reg, constant_table).llvm_value();
+            let module_val = func_codegen.get_register_or_nil(*module_reg, constant_table).llvm_value();
+            let fn_val = module.get_function("jdruby_prepend_module")
+                .ok_or_else(|| Diagnostic::error("jdruby_prepend_module not found".to_string(), SourceSpan::default()))?;
+            match builder.build_call(fn_val, &[class_val.into(), module_val.into()], "prepend_module") {
+                Ok(_) => {},
+                Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
+            };
+            func_codegen.record_register_use(*class_reg, block_idx, inst_idx);
+            func_codegen.record_register_use(*module_reg, block_idx, inst_idx);
+        }
+
+        ExtendModule(obj_reg, module_reg) => {
+            let obj_val = func_codegen.get_register_or_nil(*obj_reg, constant_table).llvm_value();
+            let module_val = func_codegen.get_register_or_nil(*module_reg, constant_table).llvm_value();
+            let fn_val = module.get_function("jdruby_extend_module")
+                .ok_or_else(|| Diagnostic::error("jdruby_extend_module not found".to_string(), SourceSpan::default()))?;
+            match builder.build_call(fn_val, &[obj_val.into(), module_val.into()], "extend_module") {
+                Ok(_) => {},
+                Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
+            };
+            func_codegen.record_register_use(*obj_reg, block_idx, inst_idx);
+            func_codegen.record_register_use(*module_reg, block_idx, inst_idx);
         }
 
         BlockCreate { dest, func_symbol, captured_vars, is_lambda: _ } => {
-            // Get the function pointer
+            // Get the sanitized function name
             let fn_name = sanitize_name(func_symbol);
-            let func_val = module.get_function(&fn_name)
+            
+            // Verify the function exists in the module
+            let _func_val = module.get_function(&fn_name)
                 .ok_or_else(|| Diagnostic::error(format!("Block function {} not found", fn_name), SourceSpan::default()))?;
             
             // Get jdruby_block_create function
-            // signature: jdruby_block_create(func_ptr, captured_vars_array, num_captures)
+            // signature: jdruby_block_create(func_symbol: *const c_char, num_captures: i32, captured_vars: *const VALUE)
             let block_fn = module.get_function("jdruby_block_create")
                 .ok_or_else(|| Diagnostic::error("jdruby_block_create not found".to_string(), SourceSpan::default()))?;
+            
+            // CRITICAL FIX: Pass the function name as a C string, not as a function pointer!
+            // The runtime needs the function name string to store and later extract.
+            let func_name_ptr = string_pool.get_cstring_ptr(builder, &fn_name);
             
             // Build captured vars array if any
             let captures_ptr = if captured_vars.is_empty() {
@@ -971,6 +1180,11 @@ fn emit_instruction<'ctx>(
                     i64_type.array_type(captured_vars.len() as u32),
                     "block_captures",
                 ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                captures_array.as_instruction()
+                    .expect("Alloca is an instruction")
+                    .set_alignment(8)
+                    .expect("Failed to set alignment");
+                
                 for (i, &cap_reg) in captured_vars.iter().enumerate() {
                     let cap_val = func_codegen.get_register_or_nil(cap_reg, constant_table).llvm_value();
                     let idx = ctx.i64_type().const_int(i as u64, false);
@@ -984,15 +1198,19 @@ fn emit_instruction<'ctx>(
                     };
                     builder.build_store(elem_ptr, cap_val)
                         .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                    if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                        let _ = inst.set_alignment(8);
+                    }
                 }
                 captures_array
             };
             
             let num_captures = ctx.i32_type().const_int(captured_vars.len() as u64, false);
             
+            // CRITICAL FIX: Pass func_name_ptr (C string) not func_val (function pointer)
             let call = match builder.build_call(
                 block_fn,
-                &[func_val.as_global_value().as_pointer_value().into(), num_captures.into(), captures_ptr.into()],
+                &[func_name_ptr.into(), num_captures.into(), captures_ptr.into()],
                 "block_create"
             ) {
                 Ok(c) => c,
@@ -1013,7 +1231,7 @@ fn emit_instruction<'ctx>(
             let name_val = func_codegen.get_register_or_nil(*name_reg, constant_table).llvm_value();
             let len = ctx.i32_type().const_int(args.len() as u64, false);
             
-            // Build args array
+            // Build args array with 8-byte alignment
             let args_array = if args.is_empty() {
                 ctx.ptr_type(AddressSpace::default()).const_null()
             } else {
@@ -1022,6 +1240,11 @@ fn emit_instruction<'ctx>(
                     i64_type.array_type(args.len() as u32),
                     "send_args",
                 ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment
+                args_ptr.as_instruction()
+                    .expect("Alloca is an instruction")
+                    .set_alignment(8)
+                    .expect("Failed to set alignment");
                 for (i, &arg) in args.iter().enumerate() {
                     let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
                     let idx = ctx.i64_type().const_int(i as u64, false);
@@ -1035,6 +1258,10 @@ fn emit_instruction<'ctx>(
                     };
                     builder.build_store(elem_ptr, arg_val)
                         .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                    // Set 8-byte alignment for i64 store
+                    if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                        let _ = inst.set_alignment(8);
+                    }
                 }
                 args_ptr
             };
@@ -1044,11 +1271,11 @@ fn emit_instruction<'ctx>(
             let fn_val = module.get_function("jdruby_send_dynamic")
                 .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
             
-            // Use the provided block if available, otherwise pass nil (Qnil = 4)
+            // Use the provided block if available, otherwise pass 0 (no block, not nil)
             let block_val = if let Some(block) = block_reg {
                 func_codegen.get_register_or_nil(*block, constant_table).llvm_value()
             } else {
-                ctx.i64_type().const_int(0x04, false).into()
+                ctx.i64_type().const_int(0, false).into()
             };
             
             let call = match builder.build_call(
@@ -1065,6 +1292,110 @@ fn emit_instruction<'ctx>(
             func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
             func_codegen.record_register_use(*obj_reg, block_idx, inst_idx);
             func_codegen.record_register_use(*name_reg, block_idx, inst_idx);
+            for &arg in args {
+                func_codegen.record_register_use(arg, block_idx, inst_idx);
+            }
+        }
+
+        SymbolToProc { dest, symbol_reg } => {
+            let symbol_val = func_codegen.get_register_or_nil(*symbol_reg, constant_table).llvm_value();
+            let fn_val = module.get_function("jdruby_symbol_to_proc")
+                .ok_or_else(|| Diagnostic::error("jdruby_symbol_to_proc not found".to_string(), SourceSpan::default()))?;
+            let call = match builder.build_call(fn_val, &[symbol_val.into()], "symbol_to_proc") {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("SymbolToProc failed: {:?}", e), SourceSpan::default())),
+            };
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Block, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Block, block_idx, inst_idx);
+            func_codegen.record_register_use(*symbol_reg, block_idx, inst_idx);
+        }
+
+        CurrentBlock { dest } => {
+            let fn_val = module.get_function("jdruby_current_block")
+                .ok_or_else(|| Diagnostic::error("jdruby_current_block not found".to_string(), SourceSpan::default()))?;
+            let call = match builder.build_call(fn_val, &[], "current_block") {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("CurrentBlock failed: {:?}", e), SourceSpan::default())),
+            };
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Block, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Block, block_idx, inst_idx);
+        }
+
+        SendWithIC { dest, obj_reg, method_name, args, block_reg, cache_slot: _ } => {
+            // For SendWithIC, the method name is a known constant, so we intern it at runtime
+            let obj_val = func_codegen.get_register_or_nil(*obj_reg, constant_table).llvm_value();
+            let method_name_ptr = string_pool.get_cstring_ptr(builder, method_name);
+            let sym_fn = module.get_function("jdruby_sym_intern")
+                .ok_or_else(|| Diagnostic::error("jdruby_sym_intern not found".to_string(), SourceSpan::default()))?;
+            let method_sym = match builder.build_call(sym_fn, &[method_name_ptr.into()], &format!("method_sym_ic_{}", method_name)) {
+                Ok(c) => c.try_as_basic_value().unwrap_basic(),
+                Err(e) => return Err(Diagnostic::error(format!("Symbol intern failed: {:?}", e), SourceSpan::default())),
+            };
+            let len = ctx.i32_type().const_int(args.len() as u64, false);
+            
+            // Build args array with 8-byte alignment
+            let args_array = if args.is_empty() {
+                ctx.ptr_type(AddressSpace::default()).const_null()
+            } else {
+                let i64_type = ctx.i64_type();
+                let args_ptr = builder.build_alloca(
+                    i64_type.array_type(args.len() as u32),
+                    "send_ic_args",
+                ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                // Set 8-byte alignment
+                args_ptr.as_instruction()
+                    .expect("Alloca is an instruction")
+                    .set_alignment(8)
+                    .expect("Failed to set alignment");
+                for (i, &arg) in args.iter().enumerate() {
+                    let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
+                    let idx = ctx.i64_type().const_int(i as u64, false);
+                    let elem_ptr = unsafe {
+                        builder.build_gep(
+                            i64_type,
+                            args_ptr,
+                            &[idx],
+                            &format!("send_ic_arg_{}", i),
+                        ).map_err(|e| Diagnostic::error(format!("GEP failed: {:?}", e), SourceSpan::default()))?
+                    };
+                    builder.build_store(elem_ptr, arg_val)
+                        .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                    // Set 8-byte alignment for i64 store
+                    if let Some(inst) = builder.get_insert_block().and_then(|bb| bb.get_last_instruction()) {
+                        let _ = inst.set_alignment(8);
+                    }
+                }
+                args_ptr
+            };
+            
+            // Use jdruby_send_dynamic with the symbol value
+            let fn_val = module.get_function("jdruby_send_dynamic")
+                .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
+            
+            // Use the provided block if available, otherwise pass 0 (no block)
+            let block_val = if let Some(block) = block_reg {
+                func_codegen.get_register_or_nil(*block, constant_table).llvm_value()
+            } else {
+                ctx.i64_type().const_int(0, false).into()
+            };
+            
+            let call = match builder.build_call(
+                fn_val, 
+                &[obj_val.into(), method_sym.into(), len.into(), args_array.into(), block_val.into()], 
+                "send_with_ic"
+            ) {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("SendWithIC failed: {:?}", e), SourceSpan::default())),
+            };
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Unknown, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            func_codegen.record_register_use(*obj_reg, block_idx, inst_idx);
             for &arg in args {
                 func_codegen.record_register_use(arg, block_idx, inst_idx);
             }
@@ -1164,17 +1495,31 @@ fn emit_terminator<'ctx>(
     constant_table: &ConstantTable<'ctx, '_>,
     ctx: &'ctx Context,
     _function: FunctionValue<'ctx>,
+    fn_name: &str,
+    module: &Module<'ctx>,
 ) -> Result<(), Vec<Diagnostic>> {
     use MirTerminator::*;
 
     match term {
         Return(Some(reg)) => {
+            // For main function, check for runtime errors before returning
+            if fn_name == "main" {
+                if let Some(check_fn) = module.get_function("jdruby_check_errors") {
+                    let _ = builder.build_call(check_fn, &[], "check_errors");
+                }
+            }
             let value = func_codegen.get_register_or_nil(*reg, constant_table).llvm_value();
             builder.build_return(Some(&value))
                 .map_err(|e| vec![Diagnostic::error(format!("Return failed: {:?}", e), SourceSpan::default())])?;
         }
         Return(None) => {
-            let nil_val = ctx.i64_type().const_int(0x04, false);
+            // For main function, check for runtime errors before returning
+            if fn_name == "main" {
+                if let Some(check_fn) = module.get_function("jdruby_check_errors") {
+                    let _ = builder.build_call(check_fn, &[], "check_errors");
+                }
+            }
+            let nil_val = constant_table.get_nil();
             builder.build_return(Some(&nil_val))
                 .map_err(|e| vec![Diagnostic::error(format!("Return failed: {:?}", e), SourceSpan::default())])?;
         }
@@ -1186,14 +1531,27 @@ fn emit_terminator<'ctx>(
         }
         CondBranch(cond, then_target, else_target) => {
             let cond_i64 = func_codegen.get_register_or_nil(*cond, constant_table).llvm_value().into_int_value();
-            // Convert i64 Ruby value to i1 boolean by comparing with 0 (Qfalse)
+            // Ruby truthiness: only false (0) and nil (4) are falsy, everything else is truthy
+            // Check: cond != 0 && cond != 4
             let zero = ctx.i64_type().const_int(0, false);
-            let cond_i1 = builder.build_int_compare(
+            let four = ctx.i64_type().const_int(0x04, false);  // Qnil
+            
+            let ne_zero = builder.build_int_compare(
                 inkwell::IntPredicate::NE,
                 cond_i64,
                 zero,
-                "cond_bool"
+                "ne_false"
             ).map_err(|e| vec![Diagnostic::error(format!("Compare failed: {:?}", e), SourceSpan::default())])?;
+            
+            let ne_four = builder.build_int_compare(
+                inkwell::IntPredicate::NE,
+                cond_i64,
+                four,
+                "ne_nil"
+            ).map_err(|e| vec![Diagnostic::error(format!("Compare failed: {:?}", e), SourceSpan::default())])?;
+            
+            let cond_i1 = builder.build_and(ne_zero, ne_four, "ruby_truthy")
+                .map_err(|e| vec![Diagnostic::error(format!("And failed: {:?}", e), SourceSpan::default())])?;
             let then_block = func_codegen.get_block(then_target)
                 .ok_or_else(|| vec![Diagnostic::error(format!("Block {} not found", then_target), SourceSpan::default())])?;
             let else_block = func_codegen.get_block(else_target)
@@ -1518,7 +1876,11 @@ mod tests {
         );
         module.functions[0].blocks[0].instructions.insert(
             1,
-            MirInst::IncludeModule(10, "Enumerable".to_string()),
+            MirInst::Load(11, "Enumerable".to_string()),
+        );
+        module.functions[0].blocks[0].instructions.insert(
+            2,
+            MirInst::IncludeModule(10, 11),
         );
         
         let result = generate_ir(&module);
@@ -1587,7 +1949,7 @@ mod tests {
         );
         module.functions[0].blocks[0].instructions.insert(
             1,
-            MirInst::MethodCall(11, 100, "puts".to_string(), vec![10]),
+            MirInst::MethodCall(11, 100, "puts".to_string(), vec![10], None),
         );
         
         let result = generate_ir(&module);
@@ -1688,25 +2050,93 @@ mod tests {
     }
 
     #[test]
-    fn test_arithmetic_operations_ir() {
+    fn test_alignment_consistency_load_store() {
         let mut module = create_simple_module();
+        module.functions[0].params.push(100); // Add self parameter
+        // Create a sequence that loads and stores local variables
         module.functions[0].blocks[0].instructions = vec![
-            MirInst::LoadConst(10, MirConst::Integer(10)),
-            MirInst::LoadConst(11, MirConst::Integer(3)),
-            MirInst::BinOp(12, MirBinOp::Add, 10, 11),
-            MirInst::BinOp(13, MirBinOp::Sub, 12, 11),
-            MirInst::BinOp(14, MirBinOp::Mul, 13, 11),
-            MirInst::BinOp(15, MirBinOp::Div, 14, 11),
+            MirInst::LoadConst(10, MirConst::Integer(42)),
+            MirInst::Store("local_var".to_string(), 10),
+            MirInst::Load(11, "local_var".to_string()),
+            MirInst::Load(12, "self".to_string()),
         ];
-        module.functions[0].blocks[0].terminator = MirTerminator::Return(Some(15));
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(Some(11));
         
         let result = generate_ir(&module);
-        assert!(result.is_ok(), "Failed to generate IR for arithmetic");
+        assert!(result.is_ok(), "Failed to generate IR for alignment test");
         
         let ir = result.unwrap();
-        assert!(ir.contains("jdruby_int_add"), "Missing int_add");
-        assert!(ir.contains("jdruby_int_sub"), "Missing int_sub");
-        assert!(ir.contains("jdruby_int_mul"), "Missing int_mul");
-        assert!(ir.contains("jdruby_int_div"), "Missing int_div");
+        // Check that loads use align 8 (not align 4)
+        let load_align_4_count = ir.matches("align 4").count();
+        assert_eq!(load_align_4_count, 0, "Found loads with align 4 - all i64 loads should use align 8");
+        
+        // Check that stores use align 8
+        assert!(ir.contains("align 8"), "Missing align 8 annotations");
+    }
+
+    #[test]
+    fn test_def_method_uses_function_pointer() {
+        use jdruby_mir::{MirFunction, MirBlock, MirInst, MirTerminator, MirConst};
+        
+        // Create a module with a class and method definition
+        let mut module = create_simple_module();
+        
+        // Add a helper function that will be the method implementation
+        let helper_func = MirFunction {
+            name: "TestClass__test_method".to_string(),
+            params: vec![0], // self
+            blocks: vec![MirBlock {
+                label: "entry".to_string(),
+                instructions: vec![
+                    MirInst::LoadConst(1, MirConst::Integer(42)),
+                ],
+                terminator: MirTerminator::Return(Some(1)),
+            }],
+            next_reg: 2,
+            span: jdruby_common::SourceSpan::default(),
+            captured_vars: vec![],
+        };
+        module.functions.push(helper_func);
+        
+        // Add class creation and method definition in main
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::ClassNew(10, "TestClass".to_string(), None),
+            MirInst::DefMethod(10, "test_method".to_string(), "TestClass__test_method".to_string()),
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(None);
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for method definition");
+        
+        let ir = result.unwrap();
+        // Check that jdruby_def_method is called
+        assert!(ir.contains("jdruby_def_method"), "Missing jdruby_def_method call");
+        // The function name should be looked up as a function, not passed as string
+        assert!(ir.contains("TestClass__test_method"), "Missing method function reference");
+    }
+
+    #[test]
+    fn test_call_result_tracked_in_register() {
+        // Test that Call instruction results are properly tracked for subsequent Store
+        let mut module = create_simple_module();
+        
+        // Create a call that returns a value, then store it
+        module.functions[0].blocks[0].instructions = vec![
+            MirInst::Call(10, "jdruby_ary_new_empty".to_string(), vec![]),
+            MirInst::Store("@tasks".to_string(), 10), // This should use the call result
+        ];
+        module.functions[0].blocks[0].terminator = MirTerminator::Return(None);
+        
+        let result = generate_ir(&module);
+        assert!(result.is_ok(), "Failed to generate IR for call result tracking");
+        
+        let ir = result.unwrap();
+        // The ivar_set should reference the call result, not a constant
+        assert!(ir.contains("jdruby_ary_new_empty"), "Missing array creation call");
+        assert!(ir.contains("jdruby_ivar_set"), "Missing ivar_set call");
+        // Should NOT store constant 4 (nil) - should store the call result
+        // Check that ivar_set doesn't have "i64 4" as the value argument
+        let has_bad_ivar_set = ir.contains("ivar_set") && ir.contains("i64 4)");
+        assert!(!has_bad_ivar_set, "ivar_set should use call result, not constant nil");
     }
 }

@@ -480,6 +480,7 @@ impl AstLowering {
                         params: vec![HirBlockParam { name: s.var.clone(), default_value: None, splat: false, block: false, span: s.span }], 
                         body,
                         captured_vars: vec![],
+                        captures_self: false,
                     }),
                     span: s.span,
                 })))
@@ -657,12 +658,39 @@ impl AstLowering {
                 operand: Self::lower_expr(&op.operand),
                 span: op.span,
             })),
-            Expr::MethodCall(call) => HirNode::Call(Box::new(HirCall {
-                receiver: call.receiver.as_ref().map(|r| Self::lower_expr(r)),
-                method: call.method.clone(),
-                args: call.args.iter().map(Self::lower_expr).collect(),
-                block: None, span: call.span,
-            })),
+            Expr::MethodCall(call) => {
+                // Handle block_arg for &:sym syntax
+                let block = call.block_arg.as_ref().map(|block_expr| {
+                    // Check if it's a symbol literal (e.g., &:run)
+                    if let Expr::SymbolLit(sym) = block_expr.as_ref() {
+                        // Create a block that will be converted via SymbolToProc in MIR
+                        HirBlock {
+                            params: vec![],
+                            body: vec![HirNode::Literal(HirLiteral {
+                                value: HirLiteralValue::Symbol(sym.name.clone()),
+                                span: sym.span,
+                            })],
+                            captured_vars: vec![],
+                            captures_self: false,
+                        }
+                    } else {
+                        // Other block expressions - not yet supported
+                        HirBlock {
+                            params: vec![],
+                            body: vec![],
+                            captured_vars: vec![],
+                            captures_self: false,
+                        }
+                    }
+                });
+                HirNode::Call(Box::new(HirCall {
+                    receiver: call.receiver.as_ref().map(|r| Self::lower_expr(r)),
+                    method: call.method.clone(),
+                    args: call.args.iter().map(Self::lower_expr).collect(),
+                    block,
+                    span: call.span,
+                }))
+            }
             Expr::BlockCall(bc) => {
                 // Special handling for define_method - it defines a method dynamically
                 if bc.call.method == "define_method" {
@@ -680,6 +708,7 @@ impl AstLowering {
                             params: block_def.params,
                             body: block_def.body,
                             captured_vars: block_def.captured_vars,
+                            captures_self: block_def.captures_self,
                         }),
                         span: bc.span,
                     }))
@@ -694,6 +723,7 @@ impl AstLowering {
                             params: block_def.params,
                             body: block_def.body,
                             captured_vars: block_def.captured_vars,
+                            captures_self: block_def.captures_self,
                         }),
                         span: bc.span,
                     }))

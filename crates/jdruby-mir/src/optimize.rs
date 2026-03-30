@@ -229,7 +229,7 @@ impl MirOptimizer {
                     MirInst::Call(_, _, args) => {
                         for a in args { used_regs.insert(*a); }
                     }
-                    MirInst::MethodCall(_, recv, _, args) => {
+                    MirInst::MethodCall(_, recv, _, args, _) => {
                         used_regs.insert(*recv);
                         for a in args { used_regs.insert(*a); }
                     }

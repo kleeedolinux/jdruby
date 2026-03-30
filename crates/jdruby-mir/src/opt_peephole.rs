@@ -83,7 +83,7 @@ impl PeepholeOptimizer {
                             changed = true;
                         }
                     }
-                    MirInst::Call(_, _, _) | MirInst::MethodCall(_, _, _, _) => {
+                    MirInst::Call(_, _, _) | MirInst::MethodCall(_, _, _, _, _) => {
                         last_store.clear();
                     }
                     _ => {}

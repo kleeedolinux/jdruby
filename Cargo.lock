@@ -331,6 +331,7 @@ dependencies = [
  "jdruby-runtime",
  "lazy_static",
  "libc",
+ "parking_lot",
 ]
 
 [[package]]

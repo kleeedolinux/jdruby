@@ -548,7 +548,7 @@ impl Parser {
     fn parse_method_call_on(&mut self, receiver: Expr) -> Option<Expr> {
         let start = receiver.span();
         let method = self.expect_ident_or_const()?;
-        let (args, kwargs) = if self.check(TokenKind::LParen) {
+        let (args, kwargs, block_arg) = if self.check(TokenKind::LParen) {
             self.advance();
             let r = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
@@ -556,12 +556,12 @@ impl Parser {
         } else if self.is_arg_start() {
             self.parse_bare_arg_list()?
         } else {
-            (vec![], vec![])
+            (vec![], vec![], None)
         };
         let span = start.merge(self.prev_span());
         Some(Expr::MethodCall(MethodCall {
             receiver: Some(Box::new(receiver)),
-            method, args, kwargs, block_arg: None, span,
+            method, args, kwargs, block_arg: block_arg.map(Box::new), span,
         }))
     }
 
@@ -706,12 +706,12 @@ impl Parser {
         // Method call with parens
         if self.check(TokenKind::LParen) {
             self.advance();
-            let (args, kwargs) = self.parse_arg_list(TokenKind::RParen)?;
+            let (args, kwargs, block_arg) = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
             let span = start.merge(self.prev_span());
             let call = MethodCall {
                 receiver: None, method: name, args, kwargs,
-                block_arg: None, span,
+                block_arg: block_arg.map(Box::new), span,
             };
             // Check for trailing block: `method(args) do ... end` or `method(args) { ... }`
             if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
@@ -729,11 +729,11 @@ impl Parser {
         }
         // Bare method call without parens (e.g. `puts "hello"`) — NOT a block
         if self.is_arg_start() && !self.check(TokenKind::Newline) && !self.check(TokenKind::Eof) {
-            let (args, kwargs) = self.parse_bare_arg_list()?;
+            let (args, kwargs, block_arg) = self.parse_bare_arg_list()?;
             let span = start.merge(self.prev_span());
             let call = MethodCall {
                 receiver: None, method: name, args, kwargs,
-                block_arg: None, span,
+                block_arg: block_arg.map(Box::new), span,
             };
             // Check for trailing block after bare args
             if self.check(TokenKind::KwDo) || self.check(TokenKind::LBrace) {
@@ -755,7 +755,7 @@ impl Parser {
         let start = self.current_span();
         let method = self.lexeme();
         self.advance();
-        let (args, kwargs) = if self.check(TokenKind::LParen) {
+        let (args, kwargs, block_arg) = if self.check(TokenKind::LParen) {
             self.advance();
             let r = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
@@ -765,24 +765,24 @@ impl Parser {
         {
             self.parse_bare_arg_list()?
         } else {
-            (vec![], vec![])
+            (vec![], vec![], None)
         };
         let span = start.merge(self.prev_span());
         Some(Expr::MethodCall(MethodCall {
-            receiver: None, method, args, kwargs, block_arg: None, span,
+            receiver: None, method, args, kwargs, block_arg: block_arg.map(Box::new), span,
         }))
     }
 
     fn parse_super(&mut self) -> Option<Expr> {
         let start = self.current_span();
         self.advance();
-        let args = if self.check(TokenKind::LParen) {
+        let (args, _, _) = if self.check(TokenKind::LParen) {
             self.advance();
-            let (a, _) = self.parse_arg_list(TokenKind::RParen)?;
+            let r = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
-            a
+            r
         } else {
-            vec![]
+            (vec![], vec![], None)
         };
         let span = start.merge(self.prev_span());
         Some(Expr::SuperCall(SuperCallExpr { args, span }))
@@ -924,16 +924,17 @@ impl Parser {
 
     // ── Argument & parameter lists ─────────────────────────
 
-    fn parse_arg_list(&mut self, end: TokenKind) -> Option<(Vec<Expr>, Vec<(String, Expr)>)> {
+    fn parse_arg_list(&mut self, end: TokenKind) -> Option<(Vec<Expr>, Vec<(String, Expr)>, Option<Expr>)> {
         let mut args = Vec::new();
         let mut kwargs = Vec::new();
+        let mut block_arg = None;
         self.skip_newlines();
         while !self.check(end) && !self.is_at_end() {
             // Block argument: `&block` or `&:symbol`
             if self.check(TokenKind::Amp) {
                 self.advance();
                 let expr = self.parse_expr()?;
-                args.push(expr); // treat &expr as a regular arg for now
+                block_arg = Some(expr);
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) { break; }
                 self.skip_newlines();
@@ -953,18 +954,19 @@ impl Parser {
             if !self.eat(TokenKind::Comma) { break; }
             self.skip_newlines();
         }
-        Some((args, kwargs))
+        Some((args, kwargs, block_arg))
     }
 
-    fn parse_bare_arg_list(&mut self) -> Option<(Vec<Expr>, Vec<(String, Expr)>)> {
+    fn parse_bare_arg_list(&mut self) -> Option<(Vec<Expr>, Vec<(String, Expr)>, Option<Expr>)> {
         let mut args = Vec::new();
         let mut kwargs = Vec::new();
+        let mut block_arg = None;
         loop {
             // Block argument: `&block` or `&:symbol`
             if self.check(TokenKind::Amp) {
                 self.advance();
                 let expr = self.parse_expr()?;
-                args.push(expr);
+                block_arg = Some(expr);
                 if !self.eat(TokenKind::Comma) { break; }
                 continue;
             }
@@ -979,7 +981,7 @@ impl Parser {
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
-        Some((args, kwargs))
+        Some((args, kwargs, block_arg))
     }
 
     fn parse_param_list(&mut self) -> Option<Vec<Param>> {
@@ -1426,16 +1428,16 @@ impl Parser {
     fn parse_yield_stmt(&mut self) -> Option<Stmt> {
         let start = self.current_span();
         self.advance();
-        let args = if self.check(TokenKind::LParen) {
+        let (args, _, _) = if self.check(TokenKind::LParen) {
             self.advance();
-            let (a, _) = self.parse_arg_list(TokenKind::RParen)?;
+            let r = self.parse_arg_list(TokenKind::RParen)?;
             self.expect(TokenKind::RParen)?;
-            a
+            r
         } else if self.is_arg_start() {
-            let (a, _) = self.parse_bare_arg_list()?;
-            a
+            let r = self.parse_bare_arg_list()?;
+            r
         } else {
-            vec![]
+            (vec![], vec![], None)
         };
         let span = start.merge(self.prev_span());
         Some(Stmt::Yield(YieldStmt { args, span }))

@@ -37,7 +37,7 @@ pub enum MirInst {
     BinOp(RegId, MirBinOp, RegId, RegId),
     UnOp(RegId, MirUnOp, RegId),
     Call(RegId, String, Vec<RegId>),
-    MethodCall(RegId, RegId, String, Vec<RegId>),
+    MethodCall(RegId, RegId, String, Vec<RegId>, Option<RegId>),
     Load(RegId, String),
     Store(String, RegId),
     Alloc(RegId, String),
@@ -56,12 +56,12 @@ pub enum MirInst {
     DefMethod(RegId, String, String),
     /// Register a singleton method on an object: def_singleton_method(obj_reg, method_name, func_name)
     DefSingletonMethod(RegId, String, String),
-    /// Include a module into a class: include_module(class_reg, module_name)
-    IncludeModule(RegId, String),
-    /// Prepend a module into a class: prepend_module(class_reg, module_name)
-    PrependModule(RegId, String),
-    /// Extend object with module: extend_module(obj_reg, module_name)
-    ExtendModule(RegId, String),
+    /// Include a module into a class: include_module(class_reg, module_reg)
+    IncludeModule(RegId, RegId),
+    /// Prepend a module into a class: prepend_module(class_reg, module_reg)
+    PrependModule(RegId, RegId),
+    /// Extend object with module: extend_module(obj_reg, module_reg)
+    ExtendModule(RegId, RegId),
 
     // =========================================================================
     // BLOCK/CLOSURE OPERATIONS
@@ -105,17 +105,23 @@ pub enum MirInst {
     CurrentBlock {
         dest: RegId,
     },
+    /// Convert symbol to proc: dest = symbol_to_proc(symbol_reg)
+    SymbolToProc {
+        dest: RegId,
+        symbol_reg: RegId,
+    },
 
     // =========================================================================
     // DYNAMIC METHOD OPERATIONS
     // =========================================================================
-    /// Dynamic method definition: define_method(class_reg, name_reg, method_ptr)
+    /// Dynamic method definition: define_method(class_reg, name_reg, method_ptr, block_reg)
     DefineMethodDynamic {
         dest: RegId,
         class_reg: RegId,
         name_reg: RegId,
         method_func: String,
         visibility: MirVisibility,
+        block_reg: Option<RegId>,  // Block to associate with the method
     },
     /// Undefine method: undef_method(class_reg, name_reg)
     UndefMethod {

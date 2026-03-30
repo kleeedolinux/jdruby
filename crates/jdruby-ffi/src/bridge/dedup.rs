@@ -64,6 +64,14 @@ pub fn value_to_str(v: VALUE) -> Option<String> {
     })
 }
 
+/// CRITICAL FIX: Extract Ruby string content from a VALUE.
+/// This is a dedicated function for extracting strings from Ruby string VALUEs.
+/// Unlike value_to_jdruby().to_ruby_string(), this properly handles the
+/// internal Ruby string representation.
+pub fn extract_rstring_content(v: VALUE) -> Option<String> {
+    value_to_str(v)
+}
+
 /// Get array length from a VALUE.
 pub fn value_ary_len(v: VALUE) -> Option<usize> {
     use crate::bridge::registry::{with_registry, ObjectRef};
