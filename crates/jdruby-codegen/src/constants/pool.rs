@@ -93,6 +93,9 @@ impl<'ctx, 'm> StringPool<'ctx, 'm> {
 
         global.set_initializer(&const_array);
 
+        // Set as constant (immutable)
+        global.set_constant(true);
+
         // Set linkage - internal (not visible outside this module)
         global.set_linkage(inkwell::module::Linkage::Internal);
 

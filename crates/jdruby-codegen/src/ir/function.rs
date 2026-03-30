@@ -8,11 +8,12 @@ use crate::constants::ConstantTable;
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::values::PointerValue;
 use std::collections::HashMap;
 
 /// Per-function code generation context.
 ///
-/// Tracks register mappings, basic blocks, and other function-level
+/// Tracks register mappings, basic blocks, local variable allocas, and other function-level
 /// state during LLVM IR generation.
 pub struct FunctionCodegen<'ctx, 'm> {
     /// Function name.
@@ -35,6 +36,10 @@ pub struct FunctionCodegen<'ctx, 'm> {
 
     /// LLVM module.
     llvm_module: &'m Module<'ctx>,
+
+    /// Map from local variable names to their alloca pointers (stack allocation).
+    /// Instance variables (@...) are NOT stored here - they use ivar_get/ivar_set.
+    local_vars: HashMap<String, PointerValue<'ctx>>,
 }
 
 impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
@@ -52,6 +57,7 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
             current_block: None,
             llvm_context,
             llvm_module,
+            local_vars: HashMap::new(),
         }
     }
 
@@ -148,6 +154,25 @@ impl<'ctx, 'm> FunctionCodegen<'ctx, 'm> {
     /// Record a register use.
     pub fn record_register_use(&mut self, reg: RegId, block_idx: u32, inst_idx: u32) {
         self.vreg_allocator.record_use(reg, InstIndex::new(block_idx, inst_idx));
+    }
+
+    /// Get or create a local variable alloca.
+    /// Returns the pointer to the stack-allocated variable.
+    pub fn get_or_create_local(&mut self, name: &str, builder: &inkwell::builder::Builder<'ctx>) -> PointerValue<'ctx> {
+        if let Some(&ptr) = self.local_vars.get(name) {
+            return ptr;
+        }
+        // Create new alloca for this local variable
+        let i64_type = self.llvm_context.i64_type();
+        let ptr = builder.build_alloca(i64_type, &format!("var_{}", name))
+            .expect("Failed to build alloca for local variable");
+        self.local_vars.insert(name.to_string(), ptr);
+        ptr
+    }
+
+    /// Get a local variable alloca if it exists.
+    pub fn get_local(&self, name: &str) -> Option<PointerValue<'ctx>> {
+        self.local_vars.get(name).copied()
     }
 }
 

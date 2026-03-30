@@ -15,6 +15,16 @@ pub mod constants;
 pub mod selection;
 pub mod optimize;
 
+/// Utility functions for name sanitization and other helpers.
+pub mod utils {
+    pub use crate::sanitize_name;
+}
+
+/// Runtime function declarations and types.
+pub mod runtime {
+    pub use crate::{emit_runtime_decls, predeclare_globals, RuntimeFn, RuntimeType, RUNTIME_FNS, RUNTIME_GLOBALS};
+}
+
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{TargetMachine, TargetTriple};
@@ -249,6 +259,47 @@ pub fn sanitize_name(name: &str) -> String {
         .replace(' ', "_")
 }
 
+/// Pre-declare all global variables referenced in Load/Store instructions.
+///
+/// This ensures global variables exist in the module before function emission.
+/// Note: 
+/// - Instance variables (starting with @) use ivar_get/ivar_set
+/// - Local variables (starting with lowercase or _) use alloca (stack)
+/// - Only constants (uppercase) and Ruby globals ($) are declared as LLVM globals
+pub fn predeclare_globals<'ctx>(ctx: &'ctx Context, module: &Module<'ctx>, mir_module: &MirModule) {
+    let i64_type = ctx.i64_type();
+
+    for func in &mir_module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Load(_, name) | MirInst::Store(name, _) => {
+                        // Skip instance variables - they use ivar_get/ivar_set
+                        if name.starts_with('@') {
+                            continue;
+                        }
+                        // Skip local variables (start with lowercase or _) - they use alloca
+                        if !name.is_empty() {
+                            let first_char = name.chars().next().unwrap();
+                            if first_char.is_ascii_lowercase() || first_char == '_' {
+                                continue;
+                            }
+                        }
+                        let global_name = sanitize_name(name);
+                        // Only create if it doesn't already exist
+                        if module.get_global(&global_name).is_none() {
+                            let global = module.add_global(i64_type, None, &global_name);
+                            global.set_linkage(inkwell::module::Linkage::Internal);
+                            global.set_initializer(&i64_type.const_int(0, false));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Emit all runtime declarations into an Inkwell module.
 pub fn emit_runtime_decls<'ctx>(ctx: &'ctx Context, module: &Module<'ctx>) {
     let i64_type = ctx.i64_type();
@@ -380,6 +431,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         string_pool.predeclare_strings(module);
         constant_table.predeclare_constants(module);
 
+        predeclare_globals(self.llvm_context, &llvm_module, module);
+
         emit_runtime_decls(self.llvm_context, &llvm_module);
 
         let pattern_registry = PatternRegistry::with_defaults();
@@ -439,6 +492,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         string_pool.predeclare_strings(module);
         constant_table.predeclare_constants(module);
 
+        predeclare_globals(self.llvm_context, &llvm_module, module);
+
         emit_runtime_decls(self.llvm_context, &llvm_module);
 
         let pattern_registry = PatternRegistry::with_defaults();
@@ -465,7 +520,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &llvm_module,
                 &builder,
             ) {
-                return Err(diagnostics);
+                for diag in diagnostics {
+                    self.context.add_diagnostic(diag);
+                }
             }
         }
 
@@ -509,9 +566,15 @@ fn emit_function<'ctx>(
 
     let ir_builder = builder;
 
-    let entry_block = ctx.append_basic_block(function, "entry");
+    let entry_block = func_codegen.get_or_create_block("entry", function);
     builder.position_at_end(entry_block);
-    func_codegen.set_current_block(entry_block);
+
+    // Emit jdruby_init_bridge() call at the start of main()
+    if fn_name == "main" {
+        if let Some(init_fn) = module.get_function("jdruby_init_bridge") {
+            let _ = builder.build_call(init_fn, &[], "init_bridge");
+        }
+    }
 
     for (i, &param_reg) in func.params.iter().enumerate() {
         let param = function.get_nth_param(i as u32)
@@ -524,11 +587,32 @@ fn emit_function<'ctx>(
         func_codegen.record_register_def(param_reg, RubyType::Unknown, 0, i as u32);
     }
 
+    // Handle captured variables for block functions - they are passed as additional parameters
+    let num_params = func.params.len();
+    for (i, captured_var_name) in func.captured_vars.iter().enumerate() {
+        let param_idx = (num_params + i) as u32;
+        let param = function.get_nth_param(param_idx)
+            .ok_or_else(|| vec![Diagnostic::error(
+                format!("Captured var parameter {} not found", param_idx),
+                func.span,
+            )])?;
+        // Store the captured variable value to its local alloca
+        let ptr = func_codegen.get_or_create_local(captured_var_name, builder);
+        builder.build_store(ptr, param)
+            .map_err(|e| vec![Diagnostic::error(format!("Store captured var failed: {:?}", e), func.span)])?;
+        // Also set up a register mapping so Load instructions work correctly
+        // Find the register that was assigned to this captured var in the MIR
+        if let Some(&reg_id) = func.params.get(param_idx as usize) {
+            let typed_val = TypedValue::new(param, RubyType::Unknown, None);
+            func_codegen.set_register(reg_id, typed_val);
+            func_codegen.record_register_def(reg_id, RubyType::Unknown, 0, param_idx);
+        }
+    }
+
     for (block_idx, block) in func.blocks.iter().enumerate() {
         if block_idx == 0 {
             continue;
         }
-        let _llvm_block = ctx.append_basic_block(function, &block.label);
         func_codegen.get_or_create_block(&block.label, function);
     }
 
@@ -622,45 +706,72 @@ fn emit_instruction<'ctx>(
         }
 
         Load(dest, name) => {
-            let global_name = sanitize_name(name);
-            let global = module.get_global(&global_name);
-            let value = if let Some(g) = global {
-                let ptr = g.as_pointer_value();
-                let i64_type = ctx.i64_type();
-                let loaded = builder.build_load(i64_type, ptr, &format!("load_{}", global_name))
-                    .map_err(|e| Diagnostic::error(format!("Load failed: {:?}", e), SourceSpan::default()))?;
-                loaded.into()
-            } else {
-                let name_ptr = string_pool.get_cstring_ptr(builder, name);
-                let fn_val = module.get_function("jdruby_const_get")
-                    .ok_or_else(|| Diagnostic::error("jdruby_const_get not found".to_string(), SourceSpan::default()))?;
-                let call = match builder.build_call(fn_val, &[name_ptr.into()], "const_get") {
-                    Ok(c) => c,
-                    Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
+            // Check if this is an instance variable (starts with @)
+            if name.starts_with('@') {
+                // Load self (the current object)
+                let self_val = if let Some(self_reg) = func_codegen.get_register(0) {
+                    self_reg.llvm_value()
+                } else {
+                    // Get self from the first parameter
+                    let fn_val = module.get_function(&sanitize_name(func_codegen.name()))
+                        .ok_or_else(|| Diagnostic::error(format!("Function {} not found", func_codegen.name()), SourceSpan::default()))?;
+                    fn_val.get_nth_param(0)
+                        .ok_or_else(|| Diagnostic::error("self parameter not found".to_string(), SourceSpan::default()))?
                 };
-                call.try_as_basic_value().unwrap_basic()
-            };
-            let typed_val = TypedValue::new(value, RubyType::Unknown, None);
-            func_codegen.set_register(*dest, typed_val);
-            func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+                // Get the ivar name without the @ prefix
+                let ivar_name = &name[1..];
+                let name_ptr = string_pool.get_cstring_ptr(builder, ivar_name);
+                let fn_val = module.get_function("jdruby_ivar_get")
+                    .ok_or_else(|| Diagnostic::error("jdruby_ivar_get not found".to_string(), SourceSpan::default()))?;
+                let call = match builder.build_call(fn_val, &[self_val.into(), name_ptr.into()], &format!("ivar_get_{}", ivar_name)) {
+                    Ok(c) => c,
+                    Err(e) => return Err(Diagnostic::error(format!("Ivar get failed: {:?}", e), SourceSpan::default())),
+                };
+                let value = call.try_as_basic_value().unwrap_basic();
+                let typed_val = TypedValue::new(value, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+                func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            } else {
+                // Local variable - use stack allocation (alloca)
+                let ptr = func_codegen.get_or_create_local(name, builder);
+                let i64_type = ctx.i64_type();
+                let loaded = builder.build_load(i64_type, ptr, &format!("load_{}", name))
+                    .map_err(|e| Diagnostic::error(format!("Load failed: {:?}", e), SourceSpan::default()))?;
+                let value = loaded.into();
+                let typed_val = TypedValue::new(value, RubyType::Unknown, None);
+                func_codegen.set_register(*dest, typed_val);
+                func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            }
         }
 
         Store(name, src) => {
             let value = func_codegen.get_register_or_nil(*src, constant_table).llvm_value();
-            let global_name = sanitize_name(name);
-            let global = module.get_global(&global_name);
-            if let Some(g) = global {
-                let ptr = g.as_pointer_value();
+            // Check if this is an instance variable (starts with @)
+            if name.starts_with('@') {
+                // Load self (the current object)
+                let self_val = if let Some(self_reg) = func_codegen.get_register(0) {
+                    self_reg.llvm_value()
+                } else {
+                    // Get self from the first parameter
+                    let fn_val = module.get_function(&sanitize_name(func_codegen.name()))
+                        .ok_or_else(|| Diagnostic::error(format!("Function {} not found", func_codegen.name()), SourceSpan::default()))?;
+                    fn_val.get_nth_param(0)
+                        .ok_or_else(|| Diagnostic::error("self parameter not found".to_string(), SourceSpan::default()))?
+                };
+                // Get the ivar name without the @ prefix
+                let ivar_name = &name[1..];
+                let name_ptr = string_pool.get_cstring_ptr(builder, ivar_name);
+                let fn_val = module.get_function("jdruby_ivar_set")
+                    .ok_or_else(|| Diagnostic::error("jdruby_ivar_set not found".to_string(), SourceSpan::default()))?;
+                match builder.build_call(fn_val, &[self_val.into(), name_ptr.into(), value.into()], &format!("ivar_set_{}", ivar_name)) {
+                    Ok(_) => {},
+                    Err(e) => return Err(Diagnostic::error(format!("Ivar set failed: {:?}", e), SourceSpan::default())),
+                };
+            } else {
+                // Local variable - use stack allocation (alloca)
+                let ptr = func_codegen.get_or_create_local(name, builder);
                 builder.build_store(ptr, value)
                     .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
-            } else {
-                let name_ptr = string_pool.get_cstring_ptr(builder, name);
-                let fn_val = module.get_function("jdruby_const_set")
-                    .ok_or_else(|| Diagnostic::error("jdruby_const_set not found".to_string(), SourceSpan::default()))?;
-                match builder.build_call(fn_val, &[name_ptr.into(), value.into()], "const_set") {
-                    Ok(_) => {},
-                    Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
-                };
             }
         }
 
@@ -686,7 +797,7 @@ fn emit_instruction<'ctx>(
 
         Call(dest, name, args) => {
             let fn_name = sanitize_name(name);
-            let result = if let Some(fn_val) = module.get_function(&fn_name) {
+            let (result, is_void) = if let Some(fn_val) = module.get_function(&fn_name) {
                 let arg_values: Vec<_> = args.iter()
                     .map(|&r| func_codegen.get_register_or_nil(r, constant_table).llvm_value().into())
                     .collect();
@@ -694,7 +805,13 @@ fn emit_instruction<'ctx>(
                     Ok(c) => c,
                     Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
                 };
-                call.try_as_basic_value().unwrap_basic()
+                let is_void = fn_val.get_type().get_return_type().is_none();
+                let val = if is_void {
+                    constant_table.get_nil()
+                } else {
+                    call.try_as_basic_value().unwrap_basic()
+                };
+                (val, is_void)
             } else {
                 let name_ptr = string_pool.get_cstring_ptr(builder, name);
                 let len = ctx.i32_type().const_int(args.len() as u64, false);
@@ -708,12 +825,12 @@ fn emit_instruction<'ctx>(
                     ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
                     for (i, &arg) in args.iter().enumerate() {
                         let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
-                        let idx = ctx.i32_type().const_int(i as u64, false);
+                        let idx = ctx.i64_type().const_int(i as u64, false);
                         let elem_ptr = unsafe {
                             builder.build_gep(
                                 i64_type,
                                 args_ptr,
-                                &[ctx.i32_type().const_int(0, false), idx],
+                                &[idx],
                                 &format!("arg_{}", i),
                             ).map_err(|e| Diagnostic::error(format!("GEP failed: {:?}", e), SourceSpan::default()))?
                         };
@@ -728,11 +845,12 @@ fn emit_instruction<'ctx>(
                     Ok(c) => c,
                     Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
                 };
-                call.try_as_basic_value().unwrap_basic()
+                (call.try_as_basic_value().unwrap_basic(), false)
             };
-            let typed_val = TypedValue::new(result, RubyType::Unknown, None);
+            let result_type = if is_void { RubyType::Nil } else { RubyType::Unknown };
+            let typed_val = TypedValue::new(result, result_type, None);
             func_codegen.set_register(*dest, typed_val);
-            func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            func_codegen.record_register_def(*dest, result_type, block_idx, inst_idx);
             for &arg in args {
                 func_codegen.record_register_use(arg, block_idx, inst_idx);
             }
@@ -752,12 +870,12 @@ fn emit_instruction<'ctx>(
                 ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
                 for (i, &arg) in args.iter().enumerate() {
                     let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
-                    let idx = ctx.i32_type().const_int(i as u64, false);
+                    let idx = ctx.i64_type().const_int(i as u64, false);
                     let elem_ptr = unsafe {
                         builder.build_gep(
                             i64_type,
                             args_ptr,
-                            &[ctx.i32_type().const_int(0, false), idx],
+                            &[idx],
                             &format!("m_arg_{}", i),
                         ).map_err(|e| Diagnostic::error(format!("GEP failed: {:?}", e), SourceSpan::default()))?
                     };
@@ -831,6 +949,125 @@ fn emit_instruction<'ctx>(
                 Err(e) => return Err(Diagnostic::error(format!("Call failed: {:?}", e), SourceSpan::default())),
             };
             func_codegen.record_register_use(*class_reg, block_idx, inst_idx);
+        }
+
+        BlockCreate { dest, func_symbol, captured_vars, is_lambda: _ } => {
+            // Get the function pointer
+            let fn_name = sanitize_name(func_symbol);
+            let func_val = module.get_function(&fn_name)
+                .ok_or_else(|| Diagnostic::error(format!("Block function {} not found", fn_name), SourceSpan::default()))?;
+            
+            // Get jdruby_block_create function
+            // signature: jdruby_block_create(func_ptr, captured_vars_array, num_captures)
+            let block_fn = module.get_function("jdruby_block_create")
+                .ok_or_else(|| Diagnostic::error("jdruby_block_create not found".to_string(), SourceSpan::default()))?;
+            
+            // Build captured vars array if any
+            let captures_ptr = if captured_vars.is_empty() {
+                ctx.ptr_type(AddressSpace::default()).const_null()
+            } else {
+                let i64_type = ctx.i64_type();
+                let captures_array = builder.build_alloca(
+                    i64_type.array_type(captured_vars.len() as u32),
+                    "block_captures",
+                ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                for (i, &cap_reg) in captured_vars.iter().enumerate() {
+                    let cap_val = func_codegen.get_register_or_nil(cap_reg, constant_table).llvm_value();
+                    let idx = ctx.i64_type().const_int(i as u64, false);
+                    let elem_ptr = unsafe {
+                        builder.build_gep(
+                            i64_type,
+                            captures_array,
+                            &[idx],
+                            &format!("capture_{}", i),
+                        ).map_err(|e| Diagnostic::error(format!("GEP failed: {:?}", e), SourceSpan::default()))?
+                    };
+                    builder.build_store(elem_ptr, cap_val)
+                        .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                }
+                captures_array
+            };
+            
+            let num_captures = ctx.i32_type().const_int(captured_vars.len() as u64, false);
+            
+            let call = match builder.build_call(
+                block_fn,
+                &[func_val.as_global_value().as_pointer_value().into(), num_captures.into(), captures_ptr.into()],
+                "block_create"
+            ) {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("BlockCreate failed: {:?}", e), SourceSpan::default())),
+            };
+            
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Block, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Block, block_idx, inst_idx);
+            for &cap in captured_vars {
+                func_codegen.record_register_use(cap, block_idx, inst_idx);
+            }
+        }
+
+        Send { dest, obj_reg, name_reg, args, block_reg } => {
+            let obj_val = func_codegen.get_register_or_nil(*obj_reg, constant_table).llvm_value();
+            let name_val = func_codegen.get_register_or_nil(*name_reg, constant_table).llvm_value();
+            let len = ctx.i32_type().const_int(args.len() as u64, false);
+            
+            // Build args array
+            let args_array = if args.is_empty() {
+                ctx.ptr_type(AddressSpace::default()).const_null()
+            } else {
+                let i64_type = ctx.i64_type();
+                let args_ptr = builder.build_alloca(
+                    i64_type.array_type(args.len() as u32),
+                    "send_args",
+                ).map_err(|e| Diagnostic::error(format!("Alloca failed: {:?}", e), SourceSpan::default()))?;
+                for (i, &arg) in args.iter().enumerate() {
+                    let arg_val = func_codegen.get_register_or_nil(arg, constant_table).llvm_value();
+                    let idx = ctx.i64_type().const_int(i as u64, false);
+                    let elem_ptr = unsafe {
+                        builder.build_gep(
+                            i64_type,
+                            args_ptr,
+                            &[idx],
+                            &format!("send_arg_{}", i),
+                        ).map_err(|e| Diagnostic::error(format!("GEP failed: {:?}", e), SourceSpan::default()))?
+                    };
+                    builder.build_store(elem_ptr, arg_val)
+                        .map_err(|e| Diagnostic::error(format!("Store failed: {:?}", e), SourceSpan::default()))?;
+                }
+                args_ptr
+            };
+            
+            // Use jdruby_send_dynamic which takes method name as i64 (symbol value)
+            // signature: jdruby_send_dynamic(obj, method_name, argc, argv, block)
+            let fn_val = module.get_function("jdruby_send_dynamic")
+                .ok_or_else(|| Diagnostic::error("jdruby_send_dynamic not found".to_string(), SourceSpan::default()))?;
+            
+            // Use the provided block if available, otherwise pass nil (Qnil = 4)
+            let block_val = if let Some(block) = block_reg {
+                func_codegen.get_register_or_nil(*block, constant_table).llvm_value()
+            } else {
+                ctx.i64_type().const_int(0x04, false).into()
+            };
+            
+            let call = match builder.build_call(
+                fn_val, 
+                &[obj_val.into(), name_val.into(), len.into(), args_array.into(), block_val.into()], 
+                "send_dynamic"
+            ) {
+                Ok(c) => c,
+                Err(e) => return Err(Diagnostic::error(format!("Send failed: {:?}", e), SourceSpan::default())),
+            };
+            let result = call.try_as_basic_value().unwrap_basic();
+            let typed_val = TypedValue::new(result, RubyType::Unknown, None);
+            func_codegen.set_register(*dest, typed_val);
+            func_codegen.record_register_def(*dest, RubyType::Unknown, block_idx, inst_idx);
+            func_codegen.record_register_use(*obj_reg, block_idx, inst_idx);
+            func_codegen.record_register_use(*name_reg, block_idx, inst_idx);
+            for &arg in args {
+                func_codegen.record_register_use(arg, block_idx, inst_idx);
+            }
         }
 
         _ => {}
@@ -948,15 +1185,26 @@ fn emit_terminator<'ctx>(
                 .map_err(|e| vec![Diagnostic::error(format!("Branch failed: {:?}", e), SourceSpan::default())])?;
         }
         CondBranch(cond, then_target, else_target) => {
-            let cond_val = func_codegen.get_register_or_nil(*cond, constant_table).llvm_value().into_int_value();
+            let cond_i64 = func_codegen.get_register_or_nil(*cond, constant_table).llvm_value().into_int_value();
+            // Convert i64 Ruby value to i1 boolean by comparing with 0 (Qfalse)
+            let zero = ctx.i64_type().const_int(0, false);
+            let cond_i1 = builder.build_int_compare(
+                inkwell::IntPredicate::NE,
+                cond_i64,
+                zero,
+                "cond_bool"
+            ).map_err(|e| vec![Diagnostic::error(format!("Compare failed: {:?}", e), SourceSpan::default())])?;
             let then_block = func_codegen.get_block(then_target)
                 .ok_or_else(|| vec![Diagnostic::error(format!("Block {} not found", then_target), SourceSpan::default())])?;
             let else_block = func_codegen.get_block(else_target)
                 .ok_or_else(|| vec![Diagnostic::error(format!("Block {} not found", else_target), SourceSpan::default())])?;
-            builder.build_conditional_branch(cond_val, then_block, else_block)
+            builder.build_conditional_branch(cond_i1, then_block, else_block)
                 .map_err(|e| vec![Diagnostic::error(format!("Conditional branch failed: {:?}", e), SourceSpan::default())])?;
         }
-        Unreachable => {}
+        Unreachable => {
+            builder.build_unreachable()
+                .map_err(|e| vec![Diagnostic::error(format!("Unreachable failed: {:?}", e), SourceSpan::default())])?;
+        }
     }
 
     Ok(())
@@ -993,7 +1241,7 @@ mod tests {
                     label: "entry".to_string(),
                     instructions: vec![
                         MirInst::LoadConst(0, MirConst::Integer(42)),
-                        MirInst::Call(1, "puts".to_string(), vec![0]),
+                        MirInst::Call(1, "jdruby_puts".to_string(), vec![0]),
                     ],
                     terminator: MirTerminator::Return(Some(0)),
                 }],
